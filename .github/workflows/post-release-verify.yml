@@ -1,0 +1,113 @@
+name: Post Release Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without leading v
+        required: true
+        type: string
+      verify_desktop_cask:
+        description: Verify the desktop app Homebrew cask for this version
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-binstall:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            binary: gpt-image-2-skill
+          - runner: macos-15
+            binary: gpt-image-2-skill
+          - runner: windows-2025
+            binary: gpt-image-2-skill.exe
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.18.1
+        with:
+          version: 1.18.1
+      - name: Install CLI with cargo-binstall
+        shell: bash
+        run: cargo binstall gpt-image-2-skill --version "${VERSION#v}" --no-confirm
+      - name: Smoke test
+        shell: bash
+        run: |
+          gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-doctor.json
+
+  npm-install:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: macos-15
+          - runner: windows-2025
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Wait for npm package visibility
+        shell: bash
+        run: |
+          version="${VERSION#v}"
+          for attempt in $(seq 1 20); do
+            if npm view "gpt-image-2-skill@${version}" version >/tmp/gpt-image-2-skill-npm-version.txt 2>/dev/null; then
+              cat /tmp/gpt-image-2-skill-npm-version.txt
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for gpt-image-2-skill@${version} to appear on npm"
+          exit 1
+      - name: Install from npm
+        shell: bash
+        run: npm install --global "gpt-image-2-skill@${VERSION#v}"
+      - name: Smoke test
+        shell: bash
+        run: gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-npm-doctor.json
+
+  homebrew:
+    runs-on: macos-15
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - name: Install formula
+        run: brew install wangnov/tap/gpt-image-2-skill
+      - name: Smoke test
+        run: gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-brew-doctor.json
+
+  homebrew-cask:
+    runs-on: macos-15
+    if: ${{ inputs.verify_desktop_cask }}
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - name: Install desktop app cask
+        run: brew install --cask wangnov/tap/gpt-image-2
+      - name: Verify app bundle
+        run: |
+          app="/Applications/GPT Image 2.app"
+          version="${VERSION#v}"
+
+          test -d "$app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Contents/Info.plist" | grep -Fx "com.wangnov.gpt-image-2"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist" | grep -Fx "$version"
+          codesign --verify --deep --strict --verbose=2 "$app"

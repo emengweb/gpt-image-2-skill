@@ -1,0 +1,16 @@
+export const DEFAULT_CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
+export const DEFAULT_OPENAI_API_BASE = "https://api.openai.com/v1";
+export const OPENAI_GENERATIONS_PATH = "/images/generations";
+export const OPENAI_EDITS_PATH = "/images/edits";
+export const DEFAULT_CODEX_MODEL = "gpt-5.4";
+export const DEFAULT_OPENAI_MODEL = "gpt-image-2";
+export const DEFAULT_INSTRUCTIONS = "You are a concise assistant.";
+export const DEFAULT_RETRY_COUNT = 3;
+export const DEFAULT_RETRY_DELAY_SECONDS = 1;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+export const DEFAULT_REFRESH_TIMEOUT_MS = 60_000;
+export const REFRESH_ENDPOINT = "https://auth.openai.com/oauth/token";
+export const REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";
+export const IMAGE_SIZE_MAX_EDGE = 3840;
+export const IMAGE_SIZE_MAX_TOTAL_PIXELS = 8_294_400;

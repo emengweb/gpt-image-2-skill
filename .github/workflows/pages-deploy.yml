@@ -1,0 +1,88 @@
+name: Deploy Static Page
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag such as v0.3.5
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-page-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  PAGES_PROJECT_NAME: gpt-image-2
+  PAGES_PRODUCTION_BRANCH: codex/static-byok-web-runtime
+
+jobs:
+  deploy:
+    name: Deploy static app to Cloudflare Pages
+    runs-on: ubuntu-24.04
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name || '' }}
+          INPUT_TAG: ${{ inputs.tag || '' }}
+        run: |
+          tag="${RELEASE_EVENT_TAG:-$INPUT_TAG}"
+          if [[ -z "$tag" ]]; then
+            echo "::error::Missing release tag."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/gpt-image-2-app/package-lock.json
+            workers/gpt-image-2-relay/package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci --prefix apps/gpt-image-2-app
+
+      - name: Install Wrangler dependencies
+        run: npm ci --prefix workers/gpt-image-2-relay
+
+      - name: Build static app
+        run: npm --prefix apps/gpt-image-2-app run build
+
+      - name: Check Cloudflare credentials
+        shell: bash
+        run: |
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "::error::Missing GitHub secret CLOUDFLARE_ACCOUNT_ID."
+            exit 1
+          fi
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error::Missing GitHub secret CLOUDFLARE_API_TOKEN."
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        shell: bash
+        run: |
+          commit_hash="$(git rev-parse HEAD)"
+          commit_message="$(git log -1 --pretty=%s)"
+          ./workers/gpt-image-2-relay/node_modules/.bin/wrangler pages deploy apps/gpt-image-2-app/dist \
+            --project-name "$PAGES_PROJECT_NAME" \
+            --branch "$PAGES_PRODUCTION_BRANCH" \
+            --commit-hash "$commit_hash" \
+            --commit-message "$commit_message"

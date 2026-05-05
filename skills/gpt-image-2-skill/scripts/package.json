@@ -1,0 +1,9 @@
+{
+  "name": "gpt-image-2-skill-scripts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0"
+  }
+}

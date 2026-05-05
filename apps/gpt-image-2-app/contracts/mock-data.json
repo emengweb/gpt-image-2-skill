@@ -1,0 +1,85 @@
+{
+  "config": {
+    "version": 1,
+    "default_provider": "my-image-api",
+    "providers": {
+      "my-image-api": {
+        "type": "openai-compatible",
+        "api_base": "https://example.com/v1",
+        "model": "gpt-image-2",
+        "credentials": {
+          "api_key": {
+            "source": "file",
+            "value": "sk-redacted"
+          }
+        }
+      },
+      "my-codex": {
+        "type": "codex",
+        "model": "gpt-5.4",
+        "credentials": {
+          "account_id": {
+            "source": "file",
+            "value": "acct-redacted"
+          },
+          "access_token": {
+            "source": "file",
+            "value": "token-redacted"
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "seq": 1,
+      "kind": "local",
+      "type": "request.started",
+      "data": {
+        "provider": "my-image-api",
+        "endpoint": "https://example.com/v1/images/generations"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "progress",
+      "type": "request_started",
+      "data": {
+        "provider": "my-image-api",
+        "phase": "request_started",
+        "status": "running",
+        "percent": 0,
+        "message": "Image request sent."
+      }
+    },
+    {
+      "seq": 3,
+      "kind": "progress",
+      "type": "output_saved",
+      "data": {
+        "provider": "my-image-api",
+        "phase": "output_saved",
+        "status": "completed",
+        "percent": 100,
+        "message": "Generated image files saved.",
+        "output": {
+          "path": "/Users/example/.codex/gpt-image-2-skill/jobs/job-1/out.png"
+        }
+      }
+    }
+  ],
+  "jobs": [
+    {
+      "id": "job-1",
+      "command": "images generate",
+      "provider": "my-image-api",
+      "status": "completed",
+      "output_path": "/Users/example/.codex/gpt-image-2-skill/jobs/job-1/out.png",
+      "created_at": "1776926953",
+      "metadata": {
+        "size": "2048x2048",
+        "format": "png"
+      }
+    }
+  ]
+}

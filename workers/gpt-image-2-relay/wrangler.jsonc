@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gpt-image-2-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "image.codex-pool.com/api/relay*",
+      "zone_name": "codex-pool.com"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "RELAY_ENABLED": "true",
+    "RELAY_MODE": "open",
+    "RELAY_ALLOWLIST_REPORT_ONLY": "true",
+    "RELAY_ALLOWED_ORIGINS": "https://image.codex-pool.com,https://gpt-image-2-dpm.pages.dev",
+    "RELAY_MAX_REQUEST_BYTES": "52428800",
+    "RELAY_MAX_RESPONSE_BYTES": "125829120",
+    "RELAY_ALLOWED_METHODS": "GET,POST,OPTIONS"
+  }
+}

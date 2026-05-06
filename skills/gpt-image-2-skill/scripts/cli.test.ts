@@ -8,8 +8,11 @@ import { createRequire } from "node:module";
 import { buildGenerateBody, requestGenerate } from "./openai-client.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { ProviderConfig } from "./types.ts";
-import { buildCodexImageBody, runCodexRequestCreate } from "./codex-client.ts";
+import { buildCodexImageBody, runCodexImageCommand, runCodexRequestCreate } from "./codex-client.ts";
 import { runTransparentVerify } from "./transparent-client.ts";
+import { resolveUserAgent } from "./config-store.ts";
+import { normalizeAndValidateImageSize, normalizeImageSizeInBody } from "./image-size.ts";
+import { loadImageSourceBytes } from "./image-sources.ts";
 
 const tinyPngBase64 = Buffer.from("fake-image").toString("base64");
 const require = createRequire(import.meta.url);
@@ -26,6 +29,10 @@ function provider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
     },
     ...overrides,
   };
+}
+
+function headerValue(init: RequestInit | undefined, name: string) {
+  return new Headers(init?.headers).get(name);
 }
 
 function writeRgbPngWithoutAlpha(filePath: string) {
@@ -77,6 +84,50 @@ test("generate body defaults to response_format=b64_json and stream=true", () =>
   });
   assert.equal(body.response_format, "b64_json");
   assert.equal(body.stream, true);
+});
+
+test("size normalization expands scalar and alias inputs", () => {
+  assert.equal(normalizeAndValidateImageSize("1024"), "1024x1024");
+  assert.equal(normalizeAndValidateImageSize("1K"), "1024x1024");
+  assert.equal(normalizeAndValidateImageSize("2k"), "2048x2048");
+  assert.equal(normalizeAndValidateImageSize("3K"), "3072x1728");
+  assert.equal(normalizeAndValidateImageSize("4K"), "3840x2160");
+  assert.equal(normalizeAndValidateImageSize("5K"), "2880x2880");
+  assert.equal(normalizeAndValidateImageSize("5120*5120"), "2880x2880");
+  assert.equal(normalizeAndValidateImageSize("5120*10240"), "1920x3840");
+  assert.equal(normalizeAndValidateImageSize("1024x1536"), "1024x1536");
+});
+
+test("request body size normalization rewrites raw size shorthands", () => {
+  assert.deepEqual(normalizeImageSizeInBody({ size: "1024", prompt: "hello" }).body, {
+    size: "1024x1024",
+    prompt: "hello",
+  });
+  assert.deepEqual(normalizeImageSizeInBody({ size: "2K", prompt: "hello" }).body, {
+    size: "2048x2048",
+    prompt: "hello",
+  });
+  assert.deepEqual(normalizeImageSizeInBody({ size: "3K", prompt: "hello" }).body, {
+    size: "3072x1728",
+    prompt: "hello",
+  });
+  const oversize = normalizeImageSizeInBody({ size: "5K", prompt: "hello" });
+  assert.deepEqual(oversize.body, {
+    size: "2880x2880",
+    prompt: "hello",
+  });
+  assert.equal(oversize.sizeResolution?.oversize_adjusted, true);
+  assert.match(oversize.sizeResolution?.message || "", /automatically reduced to 2880x2880/);
+  assert.deepEqual(normalizeImageSizeInBody({ size: 1024, prompt: "hello" }).body, {
+    size: "1024x1024",
+    prompt: "hello",
+  });
+});
+
+test("resolveUserAgent defaults to the browser-like UA and trims custom values", () => {
+  assert.equal(resolveUserAgent({}), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) xyz.chatboxapp.app/1.20.3 Chrome/116.0.5845.228 Electron/26.6.10 Safari/537.36");
+  assert.equal(resolveUserAgent({ user_agent: "  MyApp/1.0  " }), "MyApp/1.0");
+  assert.equal(resolveUserAgent({ user_agent: "   " }), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) xyz.chatboxapp.app/1.20.3 Chrome/116.0.5845.228 Electron/26.6.10 Safari/537.36");
 });
 
 test("requestGenerate rejects empty b64_json instead of writing a zero-byte file", async () => {
@@ -143,7 +194,6 @@ test("requestGenerate consumes OpenAI-compatible SSE image responses and passes 
   const originalFetch = globalThis.fetch;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -208,7 +258,6 @@ test("requestGenerate consumes vendor SSE partial_image/completed events with to
   const originalFetch = globalThis.fetch;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -486,6 +535,257 @@ test("config inspect redacts file credentials", () => {
   }
 });
 
+test("config set-user-agent persists a custom global user agent", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  try {
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+    const setResult = childProcess.spawnSync(
+      process.execPath,
+      [
+        cliPath,
+        "--json",
+        "config",
+        "set-user-agent",
+        "--value",
+        "MyApp/1.0",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+        },
+      },
+    );
+    assert.equal(setResult.status, 0, setResult.stderr);
+
+    const inspectResult = childProcess.spawnSync(
+      process.execPath,
+      [cliPath, "--json", "config", "inspect"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+        },
+      },
+    );
+    assert.equal(inspectResult.status, 0, inspectResult.stderr);
+    const payload = JSON.parse(inspectResult.stdout);
+    assert.equal(payload.config.user_agent, "MyApp/1.0");
+
+    const clearResult = childProcess.spawnSync(
+      process.execPath,
+      [cliPath, "--json", "config", "clear-user-agent"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+        },
+      },
+    );
+    assert.equal(clearResult.status, 0, clearResult.stderr);
+
+    const clearedInspectResult = childProcess.spawnSync(
+      process.execPath,
+      [cliPath, "--json", "config", "inspect"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+        },
+      },
+    );
+    assert.equal(clearedInspectResult.status, 0, clearedInspectResult.stderr);
+    const clearedPayload = JSON.parse(clearedInspectResult.stdout);
+    assert.equal(clearedPayload.config.user_agent, undefined);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("requestGenerate sends the configured user agent header on OpenAI-compatible requests", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const outPath = path.join(tempDir, "out.png");
+  const originalFetch = globalThis.fetch;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const seen: Array<{ url: string; userAgent: string | null }> = [];
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      user_agent: "MyApp/2.0",
+      providers: {},
+    }),
+  );
+  globalThis.fetch = async (input, init = {}) => {
+    seen.push({
+      url: String(input),
+      userAgent: headerValue(init, "User-Agent"),
+    });
+    return new Response(
+      JSON.stringify({
+        created: 1,
+        data: [{ b64_json: tinyPngBase64 }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  };
+  process.env.CODEX_HOME = codexHome;
+  try {
+    const result = await requestGenerate(
+      provider(),
+      "sk-test",
+      {
+        prompt: "hello",
+        out: outPath,
+      },
+      new AbortController().signal,
+      new JsonEventWriter(false),
+    );
+    assert.equal(result.files.length, 1);
+    assert.equal(seen[0]?.userAgent, "MyApp/2.0");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.CODEX_HOME = originalCodexHome;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runCodexImageCommand sends the configured user agent header", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const outPath = path.join(tempDir, "out.png");
+  const originalFetch = globalThis.fetch;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const seen: Array<{ url: string; userAgent: string | null }> = [];
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      user_agent: "MyApp/2.0",
+      providers: {
+        mock: {
+          type: "codex",
+          endpoint: "https://mock.example/v1/responses",
+          model: "gpt-5.4",
+          credentials: {
+            access_token: { source: "file", value: "access-token" },
+            account_id: { source: "file", value: "account-id" },
+          },
+        },
+      },
+    }),
+  );
+  globalThis.fetch = async (input, init = {}) => {
+    seen.push({
+      url: String(input),
+      userAgent: headerValue(init, "User-Agent"),
+    });
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"response.output_item.done","item":{"id":"item_1","type":"image_generation_call","status":"completed","result":"' +
+              tinyPngBase64 +
+              '"}}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode('data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+  process.env.CODEX_HOME = codexHome;
+  try {
+    const result = await runCodexImageCommand({
+      providerName: "mock",
+      provider: {
+        type: "codex",
+        endpoint: "https://mock.example/v1/responses",
+        model: "gpt-5.4",
+        credentials: {},
+      },
+      command: "generate",
+      prompt: "hello",
+      out: outPath,
+      events: new JsonEventWriter(false),
+    });
+    assert.equal(result.files.length, 1);
+    assert.equal(seen[0]?.userAgent, "MyApp/2.0");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.CODEX_HOME = originalCodexHome;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadImageSourceBytes sends the configured user agent header for remote sources", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const originalFetch = globalThis.fetch;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const seen: Array<{ url: string; userAgent: string | null }> = [];
+  const pngBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      user_agent: "MyApp/2.0",
+      providers: {},
+    }),
+  );
+  globalThis.fetch = async (input, init = {}) => {
+    seen.push({
+      url: String(input),
+      userAgent: headerValue(init, "User-Agent"),
+    });
+    return new Response(pngBytes, {
+      status: 200,
+      headers: { "Content-Type": "image/png" },
+    });
+  };
+  process.env.CODEX_HOME = codexHome;
+  try {
+    const loaded = await loadImageSourceBytes("https://assets.example/ref.png", "ref");
+    assert.equal(seen[0]?.userAgent, "MyApp/2.0");
+    assert.equal(loaded.mimeType, "image/png");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.CODEX_HOME = originalCodexHome;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("cli images generate sends response_format=b64_json and stream=true", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
   const codexHome = path.join(tempDir, ".codex");
@@ -550,6 +850,245 @@ globalThis.fetch = async (input, init = {}) => {
     const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
     assert.equal(capture.body.response_format, "b64_json");
     assert.equal(capture.body.stream, true);
+    assert.ok(fs.statSync(outPath).size > 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("cli images generate normalizes scalar and alias sizes before sending upstream", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const captureFile = path.join(tempDir, "capture.json");
+  const outPath = path.join(tempDir, "out.png");
+  const fetchStubPath = path.join(tempDir, "fetch-size-stub.cjs");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      default_provider: "mock",
+      providers: {
+        mock: {
+          type: "openai-compatible",
+          api_base: "https://mock.example/v1",
+          model: "gpt-image-2",
+          supports_n: true,
+          credentials: {
+            api_key: { source: "file", value: "sk-test" },
+          },
+        },
+      },
+    }),
+  );
+  fs.writeFileSync(
+    fetchStubPath,
+    `
+const fs = require("node:fs");
+const captureFile = process.env.TEST_CAPTURE_FILE;
+globalThis.fetch = async (input, init = {}) => {
+  fs.writeFileSync(captureFile, JSON.stringify({
+    url: String(input),
+    body: JSON.parse(String(init.body))
+  }));
+  return new Response(JSON.stringify({
+    created: 1,
+    data: [{ b64_json: ${JSON.stringify(tinyPngBase64)} }]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+};
+`,
+  );
+  try {
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+    const scalarResult = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "images",
+        "generate",
+        "--prompt",
+        "apple",
+        "--out",
+        outPath,
+        "--size",
+        "1024",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(scalarResult.status, 0, scalarResult.stderr);
+    const scalarPayload = JSON.parse(scalarResult.stdout);
+    const scalarCapture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(scalarCapture.body.size, "1024x1024");
+    assert.equal(scalarPayload.size_normalization.requested, "1024");
+    assert.equal(scalarPayload.size_normalization.resolved, "1024x1024");
+
+    const aliasResult = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "images",
+        "generate",
+        "--prompt",
+        "apple",
+        "--out",
+        outPath,
+        "--size",
+        "2K",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(aliasResult.status, 0, aliasResult.stderr);
+    const aliasPayload = JSON.parse(aliasResult.stdout);
+    const aliasCapture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(aliasCapture.body.size, "2048x2048");
+    assert.equal(aliasPayload.size_normalization.requested, "2K");
+    assert.equal(aliasPayload.size_normalization.resolved, "2048x2048");
+
+    const oversizedResult = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "images",
+        "generate",
+        "--prompt",
+        "apple",
+        "--out",
+        outPath,
+        "--size",
+        "5K",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(oversizedResult.status, 0, oversizedResult.stderr);
+    const oversizedPayload = JSON.parse(oversizedResult.stdout);
+    const oversizedCapture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(oversizedCapture.body.size, "2880x2880");
+    assert.equal(oversizedPayload.size_normalization.requested, "5K");
+    assert.equal(oversizedPayload.size_normalization.resolved, "2880x2880");
+    assert.equal(oversizedPayload.size_normalization.oversize_adjusted, true);
+    assert.match(oversizedPayload.size_normalization.message, /automatically reduced to 2880x2880/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("cli images generate falls back to default provider when requested provider is missing", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const captureFile = path.join(tempDir, "capture.json");
+  const outPath = path.join(tempDir, "out.png");
+  const fetchStubPath = path.join(tempDir, "fetch-stub.cjs");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      default_provider: "mock",
+      providers: {
+        mock: {
+          type: "openai-compatible",
+          api_base: "https://mock.example/v1",
+          model: "gpt-image-2",
+          supports_n: true,
+          credentials: {
+            api_key: { source: "file", value: "sk-test" },
+          },
+        },
+      },
+    }),
+  );
+  fs.writeFileSync(
+    fetchStubPath,
+    `
+const fs = require("node:fs");
+const captureFile = process.env.TEST_CAPTURE_FILE;
+globalThis.fetch = async (input, init = {}) => {
+  fs.writeFileSync(captureFile, JSON.stringify({
+    url: String(input),
+    body: JSON.parse(String(init.body))
+  }));
+  return new Response(JSON.stringify({
+    created: 1,
+    data: [{ b64_json: ${JSON.stringify(tinyPngBase64)} }]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+};
+`,
+  );
+  try {
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "images",
+        "generate",
+        "--provider",
+        "missing-provider",
+        "--prompt",
+        "apple",
+        "--out",
+        outPath,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.provider_selection.requested, "missing-provider");
+    assert.equal(payload.provider_selection.resolved, "mock");
+    assert.equal(
+      payload.provider_selection.reason,
+      "requested_provider_missing_fallback_default",
+    );
+    const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(capture.url, "https://mock.example/v1/images/generations");
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -625,7 +1164,10 @@ test("request create generate writes image output from raw body", () => {
       },
     }),
   );
-  fs.writeFileSync(bodyFile, JSON.stringify({ model: "gpt-image-2", prompt: "apple" }));
+  fs.writeFileSync(
+    bodyFile,
+    JSON.stringify({ model: "gpt-image-2", prompt: "apple", size: "5120*5120" }),
+  );
   fs.writeFileSync(
     fetchStubPath,
     `
@@ -677,6 +1219,11 @@ globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.command, "request create");
     assert.equal(payload.request.operation, "generate");
+    const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(capture.body.size, "2880x2880");
+    assert.equal(payload.size_normalization.requested, "5120*5120");
+    assert.equal(payload.size_normalization.resolved, "2880x2880");
+    assert.equal(payload.size_normalization.oversize_adjusted, true);
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1073,7 +1620,6 @@ test("runCodexRequestCreate emits aligned SSE and progress events for a successf
   process.env.CODEX_HOME = tempDir;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown, ...args: unknown[]) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -1164,7 +1710,6 @@ test("runCodexRequestCreate refreshes once on 401 and emits refresh events befor
   process.env.CODEX_HOME = tempDir;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -1258,7 +1803,6 @@ test("runCodexRequestCreate emits request_failed for response.failed and returns
   process.env.CODEX_HOME = tempDir;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -1326,7 +1870,6 @@ test("runCodexRequestCreate emits request_failed for raw error SSE before retry_
   process.env.CODEX_HOME = tempDir;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
@@ -1365,7 +1908,6 @@ test("runCodexRequestCreate emits request_failed for raw error SSE before retry_
     });
   };
   const originalSetTimeout = globalThis.setTimeout;
-  // @ts-expect-error test shim
   globalThis.setTimeout = ((fn: (...args: any[]) => void) => {
     fn();
     return 0;
@@ -1417,7 +1959,6 @@ test("runCodexRequestCreate passes through response.in_progress, response.output
   process.env.CODEX_HOME = tempDir;
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   const captured: string[] = [];
-  // @ts-expect-error narrow test shim
   process.stderr.write = ((chunk: unknown) => {
     captured.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;

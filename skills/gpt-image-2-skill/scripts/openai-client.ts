@@ -3,6 +3,10 @@ import { writeImageOutputs } from "./fs-helpers.ts";
 import type { OutputFile, ProviderConfig } from "./types.ts";
 import type { JsonEventWriter } from "./json-events.ts";
 import { loadImageSourceBytes } from "./image-sources.ts";
+import type { ImageSizeResolution } from "./image-size.ts";
+import { normalizeAndValidateImageSize, normalizeImageSizeInBody } from "./image-size.ts";
+import { readConfig, resolveUserAgent } from "./config-store.ts";
+import { buildUserAgentHeaders } from "./request-headers.ts";
 import {
   DEFAULT_OPENAI_API_BASE,
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -15,6 +19,7 @@ export interface GenerateOptions {
   out: string;
   previewOut?: string;
   size?: string;
+  sizeResolution?: ImageSizeResolution | null;
   quality?: string;
   format?: string;
   background?: string;
@@ -64,7 +69,7 @@ export function buildGenerateBody(provider: ProviderConfig, options: GenerateOpt
     response_format: options.responseFormat ?? "b64_json",
     stream: options.stream ?? true,
   };
-  addField(body, "size", options.size);
+  addField(body, "size", options.size ? normalizeAndValidateImageSize(options.size) : undefined);
   addField(body, "quality", options.quality);
   addField(body, "background", options.background);
   addField(body, "output_format", options.format);
@@ -92,6 +97,7 @@ export async function requestGenerate(
     events,
     outPath: options.out,
     previewOutPath: options.previewOut,
+    sizeResolution: options.sizeResolution,
   });
   return {
     payload: result.payload,
@@ -116,7 +122,7 @@ export async function requestEdit(
     stream: options.stream ?? true,
     images: options.refImages,
   };
-  addField(body, "size", options.size);
+  addField(body, "size", options.size ? normalizeAndValidateImageSize(options.size) : undefined);
   addField(body, "quality", options.quality);
   addField(body, "background", options.background);
   addField(body, "output_format", options.format);
@@ -133,6 +139,7 @@ export async function requestEdit(
     events,
     outPath: options.out,
     previewOutPath: options.previewOut,
+    sizeResolution: options.sizeResolution,
   });
   return {
     payload: result.payload,
@@ -155,21 +162,24 @@ export async function requestCreateOpenAi(input: {
   apiKey: string;
   operation: "generate" | "edit";
   body: Record<string, unknown>;
+  sizeResolution?: ImageSizeResolution | null;
   outImage?: string;
   previewOutImage?: string;
   expectImage?: boolean;
   events: JsonEventWriter;
 }) {
+  const normalizedBody = normalizeImageSizeInBody(input.body);
   const result = await executeOpenAi({
     endpoint: buildOpenAiOperationEndpoint(input.provider, input.operation),
     apiKey: input.apiKey,
     operation: input.operation,
-    body: input.body,
+    body: normalizedBody.body,
     providerName:
       input.provider.type === "openai-compatible" ? "openai-compatible" : "openai",
     events: input.events,
     outPath: input.outImage,
     previewOutPath: input.previewOutImage,
+    sizeResolution: input.sizeResolution ?? normalizedBody.sizeResolution,
   });
   const imageOutput =
     result.files.length === 0
@@ -209,7 +219,34 @@ async function executeOpenAi(input: {
   events: JsonEventWriter;
   outPath?: string;
   previewOutPath?: string;
+  sizeResolution?: ImageSizeResolution | null;
 }) {
+  const userAgent = resolveUserAgent(readConfig());
+  if (input.sizeResolution?.changed) {
+    input.events.emit("local", "size.normalized", {
+      provider: input.providerName,
+      requested: input.sizeResolution.requested,
+      normalized_input: input.sizeResolution.normalized_input,
+      resolved: input.sizeResolution.resolved,
+      oversize_adjusted: input.sizeResolution.oversize_adjusted,
+      message:
+        input.sizeResolution.message ||
+        `Requested size ${input.sizeResolution.requested} resolved to ${input.sizeResolution.resolved}.`,
+    });
+    input.events.emit("progress", "size_normalized", {
+      phase: "size_normalized",
+      status: "running",
+      percent: 0,
+      provider: input.providerName,
+      requested: input.sizeResolution.requested,
+      normalized_input: input.sizeResolution.normalized_input,
+      resolved: input.sizeResolution.resolved,
+      oversize_adjusted: input.sizeResolution.oversize_adjusted,
+      message:
+        input.sizeResolution.message ||
+        `Requested size ${input.sizeResolution.requested} resolved to ${input.sizeResolution.resolved}.`,
+    });
+  }
   input.events.emit("local", "request.started", {
     endpoint: input.endpoint,
     provider: input.providerName,
@@ -244,6 +281,7 @@ async function executeOpenAi(input: {
       headers: {
         Authorization: `Bearer ${input.apiKey}`,
         Accept: "application/json, text/event-stream",
+        ...buildUserAgentHeaders(userAgent),
       },
       body: form,
       signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -259,6 +297,7 @@ async function executeOpenAi(input: {
         Authorization: `Bearer ${input.apiKey}`,
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        ...buildUserAgentHeaders(userAgent),
       },
       body: JSON.stringify(input.body),
       signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -301,7 +340,7 @@ async function executeOpenAi(input: {
     transport,
   });
 
-  const buffers = await decodeImages(items, undefined);
+  const buffers = await decodeImages(items, undefined, userAgent);
   const files =
     input.outPath && buffers.length ? writeImageOutputs(buffers, input.outPath) : [];
   const previewFiles = payload.preview_data?.length && input.previewOutPath
@@ -671,7 +710,7 @@ function formatOpenAiEventError(error: Record<string, unknown>) {
   return code ? `${code}: ${message}` : message;
 }
 
-async function decodeImages(items: OpenAiImageItem[], signal?: AbortSignal) {
+async function decodeImages(items: OpenAiImageItem[], signal?: AbortSignal, userAgent?: string) {
   if (!items.length) {
     throw new CliError("invalid_response", "接口响应里没有生成图片。");
   }
@@ -696,7 +735,10 @@ async function decodeImages(items: OpenAiImageItem[], signal?: AbortSignal) {
           { index },
         );
       }
-      const response = await fetch(item.url, { signal });
+      const response = await fetch(item.url, {
+        signal,
+        headers: buildUserAgentHeaders(userAgent ?? resolveUserAgent(readConfig())),
+      });
       if (!response.ok) {
         throw new CliError("http_error", `${response.status} ${response.statusText}`);
       }

@@ -6,6 +6,7 @@ import { requestGenerate } from "./openai-client.ts";
 import { runCodexImageCommand } from "./codex-client.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { ProviderConfig } from "./types.ts";
+import type { ImageSizeResolution } from "./image-size.ts";
 import {
   controlledMattePrompt,
   extractChromaFile,
@@ -98,6 +99,7 @@ export async function runTransparentGenerate(input: {
   out: string;
   instructions?: string;
   size?: string;
+  sizeResolution?: ImageSizeResolution | null;
   quality?: string;
   compression?: number;
   moderation?: string;
@@ -166,6 +168,7 @@ export async function runTransparentGenerate(input: {
         prompt: sourcePrompt,
         out: sourcePath,
         size: input.size,
+        sizeResolution: input.sizeResolution,
         quality: input.quality,
         format: "png",
         background: "opaque",
@@ -227,6 +230,7 @@ export async function runTransparentGenerate(input: {
       quality: input.quality ?? null,
       format: "png",
     },
+    ...(input.sizeResolution?.changed ? { size_normalization: input.sizeResolution } : {}),
     source: {
       path: sourcePath,
       kept: Boolean(input.keepSources || input.sourceOut || input.reportDir),

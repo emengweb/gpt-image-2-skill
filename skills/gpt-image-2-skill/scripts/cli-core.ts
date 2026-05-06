@@ -28,6 +28,9 @@ import {
   requestGenerate,
   summarizeSavedOutput,
 } from "./openai-client.ts";
+import type { ImageSizeResolution } from "./image-size.ts";
+import { normalizeImageSizeInBody, resolveImageSize } from "./image-size.ts";
+import type { ProviderKind } from "./types.ts";
 import {
   runTransparentExtract,
   runTransparentGenerate,
@@ -111,6 +114,36 @@ async function handleConfig(command?: string, rest: string[] = []) {
       config: sanitizeConfig(config),
     };
   }
+  if (command === "set-user-agent") {
+    const args = parseConfigSetUserAgentArgs(rest);
+    const userAgent = args.value.trim();
+    if (!userAgent) {
+      throw new CliError("invalid_argument", "User agent must not be empty.");
+    }
+    const next = readConfig();
+    next.user_agent = userAgent;
+    saveConfig(next);
+    return {
+      ok: true,
+      command: "config set-user-agent",
+      config_file: configPath(),
+      config: sanitizeConfig(next),
+    };
+  }
+  if (command === "clear-user-agent") {
+    if (rest.length) {
+      throw new CliError("invalid_command", `Unexpected config clear-user-agent args: ${rest.join(" ")}`);
+    }
+    const next = readConfig();
+    delete next.user_agent;
+    saveConfig(next);
+    return {
+      ok: true,
+      command: "config clear-user-agent",
+      config_file: configPath(),
+      config: sanitizeConfig(next),
+    };
+  }
   if (command === "path") {
     return {
       ok: true,
@@ -125,15 +158,16 @@ async function handleConfig(command?: string, rest: string[] = []) {
       throw new CliError("invalid_provider_config", "Use either --supports-n or --no-supports-n, not both.");
     }
     const next = readConfig();
+    const providerType = args.providerType as ProviderKind;
     next.providers[args.name] = {
-      type: args.providerType,
+      type: providerType,
       api_base: args.apiBase,
       endpoint: args.endpoint,
       model:
         args.model ||
-        (args.providerType === "codex" ? DEFAULT_CODEX_MODEL : DEFAULT_OPENAI_MODEL),
+        (providerType === "codex" ? DEFAULT_CODEX_MODEL : DEFAULT_OPENAI_MODEL),
       supports_n: args.supportsN ? true : args.noSupportsN ? false : undefined,
-      edit_region_mode: args.editRegionMode,
+      edit_region_mode: args.editRegionMode as "native-mask" | "reference-hint" | "none" | undefined,
       credentials: {
         ...(args.apiKey ? { api_key: { source: "file", value: args.apiKey } } : {}),
         ...(args.apiKeyEnv ? { api_key: { source: "env", env: args.apiKeyEnv } } : {}),
@@ -201,10 +235,7 @@ function handleDoctor(rest: string[]) {
   return {
     ok: true,
     command: "doctor",
-    provider_selection: {
-      requested: "auto",
-      resolved: resolveProviderName(config, auth.providers.openai.ready),
-    },
+    provider_selection: resolveProviderName(config, auth.providers.openai.ready),
     retry_policy: {
       max_retries: DEFAULT_RETRY_COUNT,
       base_delay_seconds: 1,
@@ -220,11 +251,12 @@ async function handleImages(command: string | undefined, rest: string[], events:
   }
   const options = parseImageArgs(rest, command);
   const config = readConfig();
-  const providerName = resolveProviderName(
+  const providerSelection = resolveProviderName(
     config,
     Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
     options.provider,
   );
+  const providerName = providerSelection.resolved;
   const provider = resolveProvider(config, providerName);
 
   if (provider.type === "codex") {
@@ -246,7 +278,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
     return {
       ok: true,
       command: `images ${command}`,
-      provider_selection: { resolved: providerName },
+      provider_selection: providerSelection,
       request: {
         operation: command,
         ...result.requestBody,
@@ -256,6 +288,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
         max_retries: DEFAULT_RETRY_COUNT,
       },
       output: summarizeSavedOutput(result.files),
+      ...(options.sizeResolution?.changed ? { size_normalization: options.sizeResolution } : {}),
       data: {
         response: result.outcome.response,
         output_items: result.outcome.outputItems,
@@ -279,6 +312,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
         out: options.out,
         previewOut: options.previewOut,
         size: options.size,
+        sizeResolution: options.sizeResolution,
         quality: options.quality,
         format: options.format,
         background: options.background,
@@ -292,13 +326,14 @@ async function handleImages(command: string | undefined, rest: string[], events:
     return {
       ok: true,
       command: "images generate",
-      provider_selection: { resolved: providerName },
+      provider_selection: providerSelection,
       request: {
         operation: "generate",
         ...result.requestBody,
       },
       retry: { count: 0, max_retries: DEFAULT_RETRY_COUNT },
       output: summarizeSavedOutput(result.files),
+      ...(options.sizeResolution?.changed ? { size_normalization: options.sizeResolution } : {}),
       ...(result.previewFiles?.length
         ? { preview_output: summarizeSavedOutput(result.previewFiles) }
         : {}),
@@ -314,6 +349,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
       out: options.out,
       previewOut: options.previewOut,
       size: options.size,
+      sizeResolution: options.sizeResolution,
       quality: options.quality,
       format: options.format,
       background: options.background,
@@ -329,13 +365,14 @@ async function handleImages(command: string | undefined, rest: string[], events:
   return {
     ok: true,
     command: "images edit",
-    provider_selection: { resolved: providerName },
+    provider_selection: providerSelection,
     request: {
       operation: "edit",
       ...result.requestBody,
     },
     retry: { count: 0, max_retries: DEFAULT_RETRY_COUNT },
     output: summarizeSavedOutput(result.files),
+    ...(options.sizeResolution?.changed ? { size_normalization: options.sizeResolution } : {}),
     ...(result.previewFiles?.length
       ? { preview_output: summarizeSavedOutput(result.previewFiles) }
       : {}),
@@ -350,13 +387,18 @@ async function handleRequest(command: string | undefined, rest: string[], events
   }
   const args = parseRequestCreateArgs(rest);
   const config = readConfig();
-  const providerName = resolveProviderName(
+  const providerSelection = resolveProviderName(
     config,
     Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
     args.provider,
   );
+  const providerName = providerSelection.resolved;
   const provider = resolveProvider(config, providerName);
   const body = readBodyJson(args.bodyFile);
+  const normalizedBody = normalizeImageSizeInBody({
+    ...body,
+    ...(args.outImage ? { out_image: args.outImage } : {}),
+  });
 
   if (provider.type === "codex") {
     if (args.requestOperation !== "responses") {
@@ -365,7 +407,7 @@ async function handleRequest(command: string | undefined, rest: string[], events
     const result = await runCodexRequestCreate({
       providerName,
       provider,
-      body,
+      body: normalizedBody.body,
       outImage: args.outImage,
       expectImage: args.expectImage,
       events,
@@ -374,11 +416,14 @@ async function handleRequest(command: string | undefined, rest: string[], events
       ok: true,
       command: "request create",
       provider: providerName,
-      provider_selection: { resolved: providerName },
+      provider_selection: providerSelection,
       request: {
         operation: "responses",
         body_file: args.bodyFile,
       },
+      ...(normalizedBody.sizeResolution?.changed
+        ? { size_normalization: normalizedBody.sizeResolution }
+        : {}),
       response: result.outcome.response,
       output_items: result.outcome.outputItems,
       image_output: result.imageOutput,
@@ -401,10 +446,8 @@ async function handleRequest(command: string | undefined, rest: string[], events
     provider,
     apiKey,
     operation: args.requestOperation,
-    body: {
-      ...body,
-      ...(args.outImage ? { out_image: args.outImage } : {}),
-    },
+    body: normalizedBody.body,
+    sizeResolution: normalizedBody.sizeResolution,
     outImage: args.outImage,
     previewOutImage: args.previewOutImage,
     expectImage: args.expectImage,
@@ -414,12 +457,15 @@ async function handleRequest(command: string | undefined, rest: string[], events
     ok: true,
     command: "request create",
     provider: providerName,
-    provider_selection: { resolved: providerName },
+    provider_selection: providerSelection,
     request: {
       operation: args.requestOperation,
       body_file: args.bodyFile,
       model: body.model ?? null,
     },
+    ...(normalizedBody.sizeResolution?.changed
+      ? { size_normalization: normalizedBody.sizeResolution }
+      : {}),
     response: result.payload,
     image_output: result.imageOutput,
     ...(result.previewImageOutput ? { preview_output: result.previewImageOutput } : {}),
@@ -436,16 +482,17 @@ async function handleTransparent(command: string | undefined, rest: string[], ev
     return runTransparentVerify(parseTransparentVerifyArgs(rest));
   }
   if (command === "extract") {
-    return runTransparentExtract(parseTransparentExtractArgs(rest));
+    return runTransparentExtract(parseTransparentExtractArgs(rest) as Parameters<typeof runTransparentExtract>[0]);
   }
   if (command === "generate") {
     const args = parseTransparentGenerateArgs(rest);
     const config = readConfig();
-    const providerName = resolveProviderName(
+    const providerSelection = resolveProviderName(
       config,
       Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
       args.provider,
     );
+    const providerName = providerSelection.resolved;
     const provider = resolveProvider(config, providerName);
     return runTransparentGenerate({
       providerName,
@@ -454,6 +501,7 @@ async function handleTransparent(command: string | undefined, rest: string[], ev
       out: args.out,
       instructions: args.instructions,
       size: args.size,
+      sizeResolution: args.sizeResolution,
       quality: args.quality,
       compression: args.compression,
       moderation: args.moderation,
@@ -484,6 +532,7 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
     out: "",
     previewOut: undefined as string | undefined,
     size: undefined as string | undefined,
+    sizeResolution: null as ImageSizeResolution | null,
     quality: undefined as string | undefined,
     format: undefined as string | undefined,
     background: undefined as string | undefined,
@@ -522,8 +571,8 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
         i += 1;
         break;
       case "--size":
-        validateSize(value);
-        state.size = value;
+        state.sizeResolution = resolveImageSize(value);
+        state.size = state.sizeResolution.resolved;
         i += 1;
         break;
       case "--quality":
@@ -606,7 +655,7 @@ function parseTransparentVerifyArgs(rest: string[]) {
 
 function parseTransparentExtractArgs(rest: string[]) {
   const state = {
-    method: "auto",
+    method: "auto" as "auto" | "dual",
     input: undefined as string | undefined,
     darkImage: undefined as string | undefined,
     lightImage: undefined as string | undefined,
@@ -624,7 +673,7 @@ function parseTransparentExtractArgs(rest: string[]) {
     const value = rest[i + 1];
     switch (arg) {
       case "--method":
-        state.method = value;
+        state.method = value === "dual" ? "dual" : "auto";
         i += 1;
         break;
       case "--input":
@@ -689,10 +738,11 @@ function parseTransparentGenerateArgs(rest: string[]) {
     out: "",
     instructions: undefined as string | undefined,
     size: undefined as string | undefined,
+    sizeResolution: null as ImageSizeResolution | null,
     quality: undefined as string | undefined,
     compression: undefined as number | undefined,
     moderation: undefined as string | undefined,
-    method: "auto",
+    method: "auto" as "auto" | "dual",
     profile: "generic",
     material: undefined as string | undefined,
     matteColor: "#00ff00",
@@ -729,8 +779,8 @@ function parseTransparentGenerateArgs(rest: string[]) {
         i += 1;
         break;
       case "--size":
-        validateSize(value);
-        state.size = value;
+        state.sizeResolution = resolveImageSize(value);
+        state.size = state.sizeResolution.resolved;
         i += 1;
         break;
       case "--quality":
@@ -746,7 +796,7 @@ function parseTransparentGenerateArgs(rest: string[]) {
         i += 1;
         break;
       case "--method":
-        state.method = value;
+        state.method = value === "dual" ? "dual" : "auto";
         i += 1;
         break;
       case "--profile":
@@ -946,25 +996,24 @@ function parseConfigTestProviderArgs(rest: string[]) {
   return state;
 }
 
-function validateSize(size: string) {
-  if (size === "2K" || size === "4K") return;
-  const match = /^(\d+)x(\d+)$/i.exec(size);
-  if (!match) return;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (width % 16 !== 0 || height % 16 !== 0) {
-    throw new CliError("invalid_command", "Width and height must be multiples of 16.");
+function parseConfigSetUserAgentArgs(rest: string[]) {
+  const state = { value: "" };
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    const value = rest[i + 1];
+    switch (arg) {
+      case "--value":
+        state.value = value;
+        i += 1;
+        break;
+      default:
+        throw new CliError("invalid_command", `Unknown argument: ${arg}`);
+    }
   }
-  if (width > 3840 || height > 3840) {
-    throw new CliError("invalid_argument", "Max edge is 3840 pixels.");
+  if (!state.value) {
+    throw new CliError("invalid_command", "Missing required --value.");
   }
-  if (width * height > 8_294_400) {
-    throw new CliError("invalid_argument", "Max total pixels is 8294400.");
-  }
-  const ratio = Math.max(width / height, height / width);
-  if (ratio > 3) {
-    throw new CliError("invalid_argument", "Max aspect ratio is 3:1.");
-  }
+  return state;
 }
 
 function readBodyJson(filePath: string) {

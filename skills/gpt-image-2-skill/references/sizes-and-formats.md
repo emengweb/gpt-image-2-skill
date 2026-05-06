@@ -7,8 +7,11 @@ All values below come from `crates/gpt-image-2-skill/src/lib.rs`. Override with 
 | Input | Resolves to |
 |---|---|
 | `auto` | model-default size |
+| `1K` / `1024` | `1024x1024` |
 | `2K` | `2048x2048` |
+| `3K` | `3072x1728` |
 | `4K` | `3840x2160` |
+| `5K` / `5120*5120` | auto-shrinks to an in-range `WxH` |
 | `2160x3840` | portrait 4K |
 | `WIDTHxHEIGHT` | custom (must satisfy constraints below) |
 
@@ -23,6 +26,8 @@ Custom `WIDTHxHEIGHT` must satisfy ALL of:
 - square high-resolution ceiling in practice: `2880x2880`
 
 Violations return `code: "invalid_command"` (clap layer, e.g. non-multiple-of-16 caught at parse time) or `code: "invalid_argument"` (runtime layer, e.g. total-pixel cap caught after parsing) with the failing constraint in `error.message`.
+
+Oversized square-ish inputs such as `5K` or `5120*5120` are auto-shrunk to the nearest in-range `WxH` before the request is sent.
 
 ## Format and quality
 

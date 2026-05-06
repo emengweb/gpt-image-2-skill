@@ -122,6 +122,8 @@ $RUNNER scripts/gpt_image_2_skill.cjs --json config test-provider my-image-api
 
 Credential sources supported by CLI, App, and Skill: `file`, `env`, and `keychain`. File credentials are stored in the shared config file; JSON output redacts them.
 
+The shared config also supports a global `user_agent`. Use `config set-user-agent --value <ua>` to set it and `config clear-user-agent` to remove it. When unset, the runtime uses the browser-like default UA.
+
 ## Flags vs prompt — what each controls
 
 Output **properties** (not "what to draw") are flag-controlled. Putting them in the prompt is unreliable and provider-dependent.
@@ -218,7 +220,7 @@ Always inspect the JSON verification fields before delivery: `passed`, `alpha_mi
 - Shared options actually honored everywhere: `--size`, `--quality`, `--format`, `--compression`.
 - OpenAI-only options: `--background`, `--n`, `--moderation`, `--mask`, `--input-fidelity`.
 - Retries: up to 3 with exponential backoff (1s → 2s → 4s). Codex `401` triggers one token refresh + one retry.
-- Size aliases: `2K` → `2048x2048`, `4K` → `3840x2160`. Custom `WxH` requires both edges multiples of 16, max edge 3840, max 8,294,400 pixels, max aspect ratio 3:1.
+- Size aliases: `1K`/`1024` → `1024x1024`, `2K` → `2048x2048`, `3K` → `3072x1728`, `4K` → `3840x2160`. Explicit `WxH` passes through unchanged after validation; oversized inputs such as `5K` or `5120*5120` are auto-shrunk to the nearest in-range `WxH` while preserving ratio as much as possible. Custom sizes still require both edges multiples of 16, max edge 3840, max 8,294,400 pixels, max aspect ratio 3:1.
 
 ## Reference files
 

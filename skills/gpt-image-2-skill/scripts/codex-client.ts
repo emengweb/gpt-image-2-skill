@@ -14,9 +14,17 @@ import {
   REFRESH_CLIENT_ID,
   REFRESH_ENDPOINT,
 } from "./constants.ts";
-import { authPath, configPath, readConfig, resolveProvider, saveConfig } from "./config-store.ts";
+import {
+  authPath,
+  configPath,
+  readConfig,
+  resolveProvider,
+  resolveUserAgent,
+  saveConfig,
+} from "./config-store.ts";
 import { resolveRefImages } from "./image-sources.ts";
 import { writeImageOutputs } from "./fs-helpers.ts";
+import { buildUserAgentHeaders } from "./request-headers.ts";
 
 type CodexAuthState = {
   authFilePath: string;
@@ -91,6 +99,7 @@ export async function runCodexImageCommand(input: {
   events: JsonEventWriter;
 }) {
   const authState = loadCodexAuthState(input.providerName);
+  const userAgent = resolveUserAgent(readConfig());
   const body = buildCodexImageBody({
     prompt: input.prompt,
     model: input.provider.model || DEFAULT_CODEX_MODEL,
@@ -108,6 +117,7 @@ export async function runCodexImageCommand(input: {
     authState,
     body,
     input.events,
+    userAgent,
   );
   const buffers = outcome.imageItems
     .map((item) => item.result)
@@ -146,11 +156,13 @@ export async function runCodexRequestCreate(input: {
   events: JsonEventWriter;
 }) {
   const authState = loadCodexAuthState(input.providerName);
+  const userAgent = resolveUserAgent(readConfig());
   const outcome = await requestCodexWithRetry(
     input.provider.endpoint || DEFAULT_CODEX_ENDPOINT,
     authState,
     input.body,
     input.events,
+    userAgent,
   );
   let imageOutput: Record<string, unknown> | null = null;
   const buffers = outcome.imageItems
@@ -310,12 +322,13 @@ async function requestCodexWithRetry(
   authState: CodexAuthState,
   body: Record<string, unknown>,
   events: JsonEventWriter,
+  userAgent: string,
 ): Promise<CodexImageResult> {
   let refreshed = false;
   let retryCount = 0;
   while (true) {
     try {
-      const outcome = await requestCodexOnce(endpoint, authState, body, events);
+      const outcome = await requestCodexOnce(endpoint, authState, body, events, userAgent);
       return {
         ...outcome,
         refreshed,
@@ -332,7 +345,7 @@ async function requestCodexWithRetry(
           provider: "codex",
           message: "Refreshing Codex access token.",
         });
-        await refreshAccessToken(authState, events);
+        await refreshAccessToken(authState, events, userAgent);
         refreshed = true;
         events.emit("progress", "auth_refresh_completed", {
           phase: "auth_refresh_completed",
@@ -368,6 +381,7 @@ async function requestCodexOnce(
   authState: CodexAuthState,
   body: Record<string, unknown>,
   events: JsonEventWriter,
+  userAgent: string,
 ) {
   events.emit("local", "request.started", { provider: "codex", endpoint });
   events.emit("progress", "request_started", {
@@ -387,6 +401,7 @@ async function requestCodexOnce(
       "Content-Type": "application/json",
       Accept: "text/event-stream",
       originator: "codex_desktop",
+      ...buildUserAgentHeaders(userAgent),
     },
     body: JSON.stringify(body),
     signal: controller,
@@ -531,7 +546,11 @@ async function requestCodexOnce(
   };
 }
 
-async function refreshAccessToken(authState: CodexAuthState, events: JsonEventWriter) {
+async function refreshAccessToken(
+  authState: CodexAuthState,
+  events: JsonEventWriter,
+  userAgent: string,
+) {
   if (!authState.refreshToken) {
     throw new CliError("refresh_token_missing", "Missing refresh_token in auth.json");
   }
@@ -540,6 +559,7 @@ async function refreshAccessToken(authState: CodexAuthState, events: JsonEventWr
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      ...buildUserAgentHeaders(userAgent),
     },
     body: JSON.stringify({
       client_id: REFRESH_CLIENT_ID,

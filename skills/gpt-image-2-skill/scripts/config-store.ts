@@ -8,9 +8,10 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_OPENAI_API_BASE,
   DEFAULT_OPENAI_MODEL,
+  DEFAULT_USER_AGENT,
   OPENAI_API_KEY_ENV,
 } from "./constants.ts";
-import type { AppConfig, ProviderConfig } from "./types.ts";
+import type { AppConfig, ProviderConfig, ProviderSelection } from "./types.ts";
 
 const DEFAULT_CONFIG_VERSION = 1;
 
@@ -54,6 +55,10 @@ export function normalizeConfig(config: Partial<AppConfig> | undefined): AppConf
   return {
     version: DEFAULT_CONFIG_VERSION,
     default_provider: config?.default_provider,
+    user_agent:
+      typeof config?.user_agent === "string" && config.user_agent.trim()
+        ? config.user_agent.trim()
+        : undefined,
     providers: config?.providers ?? {},
   };
 }
@@ -96,6 +101,7 @@ export function sanitizeConfig(config: AppConfig): AppConfig {
   return {
     version: config.version,
     default_provider: config.default_provider,
+    user_agent: config.user_agent,
     providers: Object.fromEntries(
       Object.entries(config.providers).map(([name, provider]) => [
         name,
@@ -119,17 +125,51 @@ export function sanitizeConfig(config: AppConfig): AppConfig {
   };
 }
 
+export function resolveUserAgent(config?: Pick<AppConfig, "user_agent">) {
+  const value = config?.user_agent?.trim();
+  return value || DEFAULT_USER_AGENT;
+}
+
 export function resolveProviderName(
   config: AppConfig,
   openaiReady: boolean,
   requested?: string,
-) {
-  if (requested && requested !== "auto") return requested;
-  if (config.default_provider && config.providers[config.default_provider]) {
-    return config.default_provider;
+) : ProviderSelection {
+  if (requested && requested !== "auto") {
+    if (requested === "openai" || requested === "codex" || config.providers[requested]) {
+      return {
+        requested,
+        resolved: requested,
+        reason: "requested",
+      };
+    }
+    if (config.default_provider && config.providers[config.default_provider]) {
+      return {
+        requested,
+        resolved: config.default_provider,
+        reason: "requested_provider_missing_fallback_default",
+      };
+    }
   }
-  if (openaiReady) return "openai";
-  return "codex";
+  if (config.default_provider && config.providers[config.default_provider]) {
+    return {
+      requested: requested ?? "auto",
+      resolved: config.default_provider,
+      reason: "config_default_provider",
+    };
+  }
+  if (openaiReady) {
+    return {
+      requested: requested ?? "auto",
+      resolved: "openai",
+      reason: "openai_env_ready",
+    };
+  }
+  return {
+    requested: requested ?? "auto",
+    resolved: "codex",
+    reason: "codex_builtin",
+  };
 }
 
 export function resolveProvider(config: AppConfig, providerName: string): ProviderConfig {

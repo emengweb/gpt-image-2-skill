@@ -28,7 +28,19 @@ export interface ProviderConfig {
 export interface AppConfig {
   version: 1;
   default_provider?: string;
+  user_agent?: string;
   providers: Record<string, ProviderConfig>;
+}
+
+export interface ProviderSelection {
+  requested: string;
+  resolved: string;
+  reason:
+    | "requested"
+    | "requested_provider_missing_fallback_default"
+    | "config_default_provider"
+    | "openai_env_ready"
+    | "codex_builtin";
 }
 
 export interface JsonError {

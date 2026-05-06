@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CliError } from "./errors.ts";
+import { readConfig, resolveUserAgent } from "./config-store.ts";
+import { buildUserAgentHeaders } from "./request-headers.ts";
 
 export function decodeBase64Bytes(value: string) {
   const encoded = value.startsWith("data:image/")
@@ -80,7 +82,10 @@ export async function loadImageSourceBytes(source: string, fallbackName: string)
   try {
     const url = new URL(source);
     if (url.protocol === "http:" || url.protocol === "https:") {
-      const response = await fetch(source);
+      const userAgent = resolveUserAgent(readConfig());
+      const response = await fetch(source, {
+        headers: buildUserAgentHeaders(userAgent),
+      });
       if (!response.ok) {
         throw new CliError("http_error", `${response.status} ${response.statusText}`);
       }

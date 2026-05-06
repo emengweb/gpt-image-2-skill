@@ -51,7 +51,7 @@ Credential sources:
 
 ## Global user-agent
 
-The runtime sends a browser-like `User-Agent` by default. To override it globally, set the top-level `user_agent` field or use:
+The runtime sends `OpenAI/JS 4.96.0` by default. To override it globally, set the top-level `user_agent` field or use:
 
 ```bash
 node scripts/gpt_image_2_skill.cjs --json config set-user-agent --value "MyApp/1.0"

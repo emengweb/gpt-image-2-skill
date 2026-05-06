@@ -122,7 +122,7 @@ $RUNNER scripts/gpt_image_2_skill.cjs --json config test-provider my-image-api
 
 Credential sources supported by CLI, App, and Skill: `file`, `env`, and `keychain`. File credentials are stored in the shared config file; JSON output redacts them.
 
-The shared config also supports a global `user_agent`. Use `config set-user-agent --value <ua>` to set it and `config clear-user-agent` to remove it. When unset, the runtime uses the browser-like default UA.
+The shared config also supports a global `user_agent`. Use `config set-user-agent --value <ua>` to set it and `config clear-user-agent` to remove it. When unset, the runtime uses `OpenAI/JS 4.96.0`.
 
 ## Flags vs prompt — what each controls
 

@@ -124,10 +124,10 @@ test("request body size normalization rewrites raw size shorthands", () => {
   });
 });
 
-test("resolveUserAgent defaults to the browser-like UA and trims custom values", () => {
-  assert.equal(resolveUserAgent({}), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) xyz.chatboxapp.app/1.20.3 Chrome/116.0.5845.228 Electron/26.6.10 Safari/537.36");
+test("resolveUserAgent defaults to OpenAI/JS 4.96.0 and trims custom values", () => {
+  assert.equal(resolveUserAgent({}), "OpenAI/JS 4.96.0");
   assert.equal(resolveUserAgent({ user_agent: "  MyApp/1.0  " }), "MyApp/1.0");
-  assert.equal(resolveUserAgent({ user_agent: "   " }), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) xyz.chatboxapp.app/1.20.3 Chrome/116.0.5845.228 Electron/26.6.10 Safari/537.36");
+  assert.equal(resolveUserAgent({ user_agent: "   " }), "OpenAI/JS 4.96.0");
 });
 
 test("requestGenerate rejects empty b64_json instead of writing a zero-byte file", async () => {

@@ -54,15 +54,8 @@ Credential sources:
 The runtime sends `OpenAI/JS 4.96.0` by default. To override it globally, set the top-level `user_agent` field or use:
 
 ```bash
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 
 $SKILL_CMD --json config set-user-agent --value "MyApp/1.0"
 $SKILL_CMD --json config clear-user-agent
@@ -96,23 +89,11 @@ Codex `401` triggers exactly one access-token refresh, then a single retry. Refr
 
 ## Runtime discovery and update
 
-The runtime in `scripts/` is pure TypeScript. Prefer the checked-out local wrapper only when `scripts/node_modules` is already present. If the local dependencies are missing, install and use the global CLI instead of creating repo-local dependency artifacts.
+Prefer the installed global CLI so the skill does not create or rely on repo-local `scripts/node_modules`.
 
 ```bash
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-USE_LOCAL_RUNTIME=0
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-  USE_LOCAL_RUNTIME=1
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 
 $SKILL_CMD --json doctor
-if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
-  $RUNNER scripts/selftest.cjs
-fi
 ```

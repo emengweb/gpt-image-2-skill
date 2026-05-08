@@ -197,7 +197,7 @@ git clone https://github.com/emengweb/gpt-image-2-skill /tmp/gpt-image-2-skill
 cp -r /tmp/gpt-image-2-skill/skills/gpt-image-2-skill ~/.claude/skills/
 ```
 
-Skill 入口是 `node skills/gpt-image-2-skill/scripts/gpt_image_2_skill.cjs`。包装器按这个顺序解析运行时：
+Skill 推荐优先使用已安装的全局 `gpt-image-2-skill` CLI，这样不会在 skill 脚本目录创建或复用 `scripts/node_modules`。二进制包装器本身按这个顺序解析运行时：
 
 1. `GPT_IMAGE_2_SKILL_BIN`
 2. 已安装的 `gpt-image-2-skill`

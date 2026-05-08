@@ -7,23 +7,13 @@ Run image generation and editing through one CLI surface that hides provider dif
 
 ## Runtime advice
 
-- If the system already has `bun`, prefer `bun` over `node` as the local runtime.
-- If `scripts/node_modules` already exists, prefer the checked-out local runtime.
-- If the local script dependencies are missing, install and use the global CLI instead of writing fresh dependencies into `scripts/`.
+- Prefer the installed global `gpt-image-2-skill` CLI so the skill does not create or reuse repo-local `scripts/node_modules`.
+- If the global CLI is missing, install it globally instead of writing dependencies into `scripts/`.
 - Reuse one resolved command string for the rest of the session so all examples hit the same runtime.
 
 ```bash
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-USE_LOCAL_RUNTIME=0
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-  USE_LOCAL_RUNTIME=1
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 ```
 
 ## When to use this skill
@@ -40,17 +30,8 @@ Always pass `--json` so the result is machine-readable. Add `--json-events` when
 
 ```bash
 # 0. Resolve the runtime once
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-USE_LOCAL_RUNTIME=0
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-  USE_LOCAL_RUNTIME=1
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 
 # 1. Confirm runtime + provider readiness
 $SKILL_CMD --json config inspect
@@ -85,10 +66,8 @@ $SKILL_CMD --json \
   request create --request-operation generate \
   --body-file /tmp/body.json --out-image /tmp/out.png --expect-image
 
-# 8. Optional local self-test when the checked-out runtime is already ready
-if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
-  $RUNNER scripts/selftest.cjs
-fi
+# 8. Optional smoke check
+$SKILL_CMD --json doctor
 ```
 
 Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`. You can place `--provider <id>` before the command group or inside the subcommand; leave the default `--provider auto` to use `default_provider` first. Streaming now defaults to off; pass `--stream` when you want SSE/streaming behavior for a single request, or persist it on a provider via `config add-provider --stream`.
@@ -98,42 +77,21 @@ Force a provider with `--provider openai`, `--provider codex`, or any named prov
 Before using newly documented command groups, especially `transparent generate`, `transparent extract`, or `transparent verify`, confirm the selected runtime is ready:
 
 ```bash
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-USE_LOCAL_RUNTIME=0
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-  USE_LOCAL_RUNTIME=1
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 
 $SKILL_CMD --json doctor
-if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
-  $RUNNER scripts/selftest.cjs
-fi
 ```
 
-If a documented subcommand fails unexpectedly, first check which path `SKILL_CMD` resolved to. For the local wrapper, diagnose dependency drift in `scripts/node_modules`; for the global CLI, treat it as a stale install and verify the installed package version first.
+If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
 
 ## Shared config
 
 Use the CLI config surface when the user asks to add or pin a provider:
 
 ```bash
-RUNNER=node
-command -v bun >/dev/null 2>&1 && RUNNER=bun
-USE_LOCAL_RUNTIME=0
-
-if test -d scripts/node_modules; then
-  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
-  USE_LOCAL_RUNTIME=1
-else
-  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-  SKILL_CMD="gpt-image-2-skill"
-fi
+command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+SKILL_CMD="gpt-image-2-skill"
 
 $SKILL_CMD --json config path
 $SKILL_CMD --json config add-provider \

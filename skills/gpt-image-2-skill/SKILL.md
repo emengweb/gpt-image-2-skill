@@ -8,20 +8,22 @@ Run image generation and editing through one CLI surface that hides provider dif
 ## Runtime advice
 
 - If the system already has `bun`, prefer `bun` over `node` as the local runtime.
-- If `scripts/node_modules` does not exist yet, treat this as first use and install the local script dependencies before invoking the skill.
-- Prefer working from the checked-out skill directory instead of looking for an older globally installed CLI.
+- If `scripts/node_modules` already exists, prefer the checked-out local runtime.
+- If the local script dependencies are missing, install and use the global CLI instead of writing fresh dependencies into `scripts/`.
+- Reuse one resolved command string for the rest of the session so all examples hit the same runtime.
 
 ```bash
 RUNNER=node
 command -v bun >/dev/null 2>&1 && RUNNER=bun
+USE_LOCAL_RUNTIME=0
 
-test -d scripts/node_modules || {
-  if [ "$RUNNER" = "bun" ]; then
-    bun install --cwd scripts
-  else
-    npm install --prefix scripts --cache /private/tmp/gpt-image-2-skill-npm-cache
-  fi
-}
+if test -d scripts/node_modules; then
+  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
+  USE_LOCAL_RUNTIME=1
+else
+  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+  SKILL_CMD="gpt-image-2-skill"
+fi
 ```
 
 ## When to use this skill
@@ -37,70 +39,84 @@ test -d scripts/node_modules || {
 Always pass `--json` so the result is machine-readable. Add `--json-events` when progress visibility matters.
 
 ```bash
-# 0. Pick a runtime
+# 0. Resolve the runtime once
 RUNNER=node
 command -v bun >/dev/null 2>&1 && RUNNER=bun
+USE_LOCAL_RUNTIME=0
+
+if test -d scripts/node_modules; then
+  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
+  USE_LOCAL_RUNTIME=1
+else
+  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+  SKILL_CMD="gpt-image-2-skill"
+fi
 
 # 1. Confirm runtime + provider readiness
-$RUNNER scripts/gpt_image_2_skill.cjs --json config inspect
-$RUNNER scripts/gpt_image_2_skill.cjs --json doctor
-$RUNNER scripts/gpt_image_2_skill.cjs --json auth inspect
+$SKILL_CMD --json config inspect
+$SKILL_CMD --json doctor
+$SKILL_CMD --json auth inspect
 
 # 2. Generate a final transparent PNG deliverable
-$RUNNER scripts/gpt_image_2_skill.cjs --json --json-events \
+$SKILL_CMD --json --json-events \
   transparent generate --prompt "..." --out /tmp/asset.png \
   --size 2K --quality high
 
 # 3. Generate a normal image (auto-selects provider; OpenAI first, then Codex)
-$RUNNER scripts/gpt_image_2_skill.cjs --json --json-events \
+$SKILL_CMD --json --json-events \
   images generate --prompt "..." --out /tmp/out.png \
   --format png --size 2K
 
 # 4. Edit a reference image (OpenAI multipart)
-$RUNNER scripts/gpt_image_2_skill.cjs --json --json-events \
+$SKILL_CMD --json --json-events \
   images edit --prompt "..." --ref-image /tmp/in.png --out /tmp/out.png
 
 # 5. Remove a controlled background from existing source images
-$RUNNER scripts/gpt_image_2_skill.cjs --json \
+$SKILL_CMD --json \
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \
   --method chroma --matte-color auto --strict
 
 # 6. Verify the final file before delivery
-$RUNNER scripts/gpt_image_2_skill.cjs --json \
+$SKILL_CMD --json \
   transparent verify --input /tmp/asset.png --profile icon --strict
 
 # 7. Raw request escape hatch
-$RUNNER scripts/gpt_image_2_skill.cjs --json \
+$SKILL_CMD --json \
   request create --request-operation generate \
   --body-file /tmp/body.json --out-image /tmp/out.png --expect-image
 
-# 8. Self-test (calls doctor + auth inspect)
-$RUNNER scripts/selftest.cjs
+# 8. Optional local self-test when the checked-out runtime is already ready
+if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
+  $RUNNER scripts/selftest.cjs
+fi
 ```
 
 Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`; leave the default `--provider auto` to use `default_provider` first. Override the legacy OpenAI base URL with `--openai-api-base https://...`.
 
 ## Runtime consistency check
 
-Before using newly documented command groups, especially `transparent generate`, `transparent extract`, or `transparent verify`, confirm the local script runtime is ready:
+Before using newly documented command groups, especially `transparent generate`, `transparent extract`, or `transparent verify`, confirm the selected runtime is ready:
 
 ```bash
 RUNNER=node
 command -v bun >/dev/null 2>&1 && RUNNER=bun
+USE_LOCAL_RUNTIME=0
 
-test -d scripts/node_modules || {
-  if [ "$RUNNER" = "bun" ]; then
-    bun install --cwd scripts
-  else
-    npm install --prefix scripts --cache /private/tmp/gpt-image-2-skill-npm-cache
-  fi
-}
+if test -d scripts/node_modules; then
+  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
+  USE_LOCAL_RUNTIME=1
+else
+  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+  SKILL_CMD="gpt-image-2-skill"
+fi
 
-$RUNNER scripts/gpt_image_2_skill.cjs --json doctor
-$RUNNER scripts/selftest.cjs
+$SKILL_CMD --json doctor
+if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
+  $RUNNER scripts/selftest.cjs
+fi
 ```
 
-If a documented subcommand fails unexpectedly, diagnose local dependency drift in `scripts/node_modules` first rather than checking for old Rust sidecars or globally installed CLI binaries.
+If a documented subcommand fails unexpectedly, first check which path `SKILL_CMD` resolved to. For the local wrapper, diagnose dependency drift in `scripts/node_modules`; for the global CLI, treat it as a stale install and verify the installed package version first.
 
 ## Shared config
 
@@ -109,15 +125,24 @@ Use the CLI config surface when the user asks to add or pin a provider:
 ```bash
 RUNNER=node
 command -v bun >/dev/null 2>&1 && RUNNER=bun
+USE_LOCAL_RUNTIME=0
 
-$RUNNER scripts/gpt_image_2_skill.cjs --json config path
-$RUNNER scripts/gpt_image_2_skill.cjs --json config add-provider \
+if test -d scripts/node_modules; then
+  SKILL_CMD="$RUNNER scripts/gpt_image_2_skill.cjs"
+  USE_LOCAL_RUNTIME=1
+else
+  command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
+  SKILL_CMD="gpt-image-2-skill"
+fi
+
+$SKILL_CMD --json config path
+$SKILL_CMD --json config add-provider \
   --name my-image-api \
   --type openai-compatible \
   --api-base https://example.com/v1 \
   --api-key sk-... \
   --set-default
-$RUNNER scripts/gpt_image_2_skill.cjs --json config test-provider my-image-api
+$SKILL_CMD --json config test-provider my-image-api
 ```
 
 Credential sources supported by CLI, App, and Skill: `file`, `env`, and `keychain`. File credentials are stored in the shared config file; JSON output redacts them.
@@ -189,23 +214,23 @@ Examples:
 
 ```bash
 # Simple asset: final transparent PNG, sources hidden unless there is a failure
-$RUNNER scripts/gpt_image_2_skill.cjs --json --json-events \
+$SKILL_CMD --json --json-events \
   transparent generate \
   --prompt "a polished fantasy sword game asset, no text, no frame" \
   --out /tmp/sword.png --size 2K --quality high
 
 # Agent-controlled chroma flow
-$RUNNER scripts/gpt_image_2_skill.cjs --json --json-events \
+$SKILL_CMD --json --json-events \
   images generate \
   --prompt "a silver necklace, centered, on a perfectly flat pure magenta background, no shadow" \
   --out /tmp/necklace-magenta.png --format png --size 2K
-$RUNNER scripts/gpt_image_2_skill.cjs --json \
+$SKILL_CMD --json \
   transparent extract --method chroma \
   --input /tmp/necklace-magenta.png --matte-color auto \
   --out /tmp/necklace.png --material sticker --strict
 
 # Semi-transparent material flow
-$RUNNER scripts/gpt_image_2_skill.cjs --json \
+$SKILL_CMD --json \
   transparent extract --method dual \
   --dark-image /tmp/glow-on-black.png \
   --light-image /tmp/glow-on-white.png \
@@ -235,4 +260,4 @@ Load on demand for deeper detail:
 
 ## Codex compatibility
 
-The companion file `agents/openai.yaml` is read by Codex Skill runtime only (Claude Code ignores it). Both runtimes execute the commands above with `cwd` at the skill directory, so relative paths like `scripts/gpt_image_2_skill.cjs` resolve in either harness.
+The companion file `agents/openai.yaml` is read by Codex Skill runtime only (Claude Code ignores it). Both runtimes execute the commands above with `cwd` at the skill directory, so the `SKILL_CMD` probe can safely decide between the checked-out local wrapper and the globally installed CLI.

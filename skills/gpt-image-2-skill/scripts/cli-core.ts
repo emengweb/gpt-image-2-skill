@@ -41,7 +41,7 @@ export async function runCli(argv: string[]) {
   const flags = parseGlobalFlags(argv);
   const events = new JsonEventWriter(flags.jsonEvents);
   try {
-    const result = await dispatch(flags.rest, events);
+    const result = await dispatch(flags.rest, events, flags.provider);
     if (flags.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } else if (typeof result === "string") {
@@ -55,16 +55,16 @@ export async function runCli(argv: string[]) {
   }
 }
 
-async function dispatch(argv: string[], events: JsonEventWriter) {
+async function dispatch(argv: string[], events: JsonEventWriter, globalProvider?: string) {
   const [group, command, ...rest] = argv;
   if (!group) throw new CliError("invalid_command", "Missing command.");
   if (group === "--version" || group === "version") return "0.3.8-ts";
   if (group === "config") return handleConfig(command, rest);
   if (group === "auth") return handleAuth(command);
-  if (group === "doctor") return handleDoctor(rest);
-  if (group === "images") return handleImages(command, rest, events);
-  if (group === "request") return handleRequest(command, rest, events);
-  if (group === "transparent") return handleTransparent(command, rest, events);
+  if (group === "doctor") return handleDoctor(rest, globalProvider);
+  if (group === "images") return handleImages(command, rest, events, globalProvider);
+  if (group === "request") return handleRequest(command, rest, events, globalProvider);
+  if (group === "transparent") return handleTransparent(command, rest, events, globalProvider);
   throw new CliError("invalid_command", `Unknown command: ${group}`);
 }
 
@@ -89,8 +89,11 @@ function emitError(asJson: boolean, error: JsonError) {
 function parseGlobalFlags(argv: string[]) {
   let json = false;
   let jsonEvents = false;
+  let provider: string | undefined;
   const rest: string[] = [];
-  for (const arg of argv) {
+  let commandStarted = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
     if (arg === "--json") {
       json = true;
       continue;
@@ -99,9 +102,15 @@ function parseGlobalFlags(argv: string[]) {
       jsonEvents = true;
       continue;
     }
+    if (!commandStarted && arg === "--provider") {
+      provider = argv[i + 1];
+      i += 1;
+      continue;
+    }
     rest.push(arg);
+    commandStarted = true;
   }
-  return { json, jsonEvents, rest };
+  return { json, jsonEvents, provider, rest };
 }
 
 async function handleConfig(command?: string, rest: string[] = []) {
@@ -166,6 +175,7 @@ async function handleConfig(command?: string, rest: string[] = []) {
       model:
         args.model ||
         (providerType === "codex" ? DEFAULT_CODEX_MODEL : DEFAULT_OPENAI_MODEL),
+      stream: args.stream,
       supports_n: args.supportsN ? true : args.noSupportsN ? false : undefined,
       edit_region_mode: args.editRegionMode as "native-mask" | "reference-hint" | "none" | undefined,
       credentials: {
@@ -226,7 +236,7 @@ function handleAuth(command?: string) {
   };
 }
 
-function handleDoctor(rest: string[]) {
+function handleDoctor(rest: string[], globalProvider?: string) {
   if (rest.length) {
     throw new CliError("invalid_command", `Unexpected doctor args: ${rest.join(" ")}`);
   }
@@ -235,7 +245,7 @@ function handleDoctor(rest: string[]) {
   return {
     ok: true,
     command: "doctor",
-    provider_selection: resolveProviderName(config, auth.providers.openai.ready),
+    provider_selection: resolveProviderName(config, auth.providers.openai.ready, globalProvider),
     retry_policy: {
       max_retries: DEFAULT_RETRY_COUNT,
       base_delay_seconds: 1,
@@ -244,7 +254,12 @@ function handleDoctor(rest: string[]) {
   };
 }
 
-async function handleImages(command: string | undefined, rest: string[], events: JsonEventWriter) {
+async function handleImages(
+  command: string | undefined,
+  rest: string[],
+  events: JsonEventWriter,
+  globalProvider?: string,
+) {
   if (!command) throw new CliError("invalid_command", "Missing images subcommand.");
   if (command !== "generate" && command !== "edit") {
     throw new CliError("invalid_command", `Unknown images command: ${command}`);
@@ -254,7 +269,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
   const providerSelection = resolveProviderName(
     config,
     Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
-    options.provider,
+    options.provider ?? globalProvider,
   );
   const providerName = providerSelection.resolved;
   const provider = resolveProvider(config, providerName);
@@ -273,6 +288,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
       quality: options.quality,
       format: options.format,
       compression: options.compression,
+      stream: options.stream,
       events,
     });
     return {
@@ -319,6 +335,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
         compression: options.compression,
         moderation: options.moderation,
         n: options.n,
+        stream: options.stream,
       },
       controller.signal,
       events,
@@ -358,6 +375,7 @@ async function handleImages(command: string | undefined, rest: string[], events:
       n: options.n,
       refImages: options.refImages,
       mask: options.mask,
+      stream: options.stream,
     },
     controller.signal,
     events,
@@ -381,7 +399,12 @@ async function handleImages(command: string | undefined, rest: string[], events:
   };
 }
 
-async function handleRequest(command: string | undefined, rest: string[], events: JsonEventWriter) {
+async function handleRequest(
+  command: string | undefined,
+  rest: string[],
+  events: JsonEventWriter,
+  globalProvider?: string,
+) {
   if (command !== "create") {
     throw new CliError("invalid_command", `Unknown request command: ${command ?? ""}`.trim());
   }
@@ -390,13 +413,14 @@ async function handleRequest(command: string | undefined, rest: string[], events
   const providerSelection = resolveProviderName(
     config,
     Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
-    args.provider,
+    args.provider ?? globalProvider,
   );
   const providerName = providerSelection.resolved;
   const provider = resolveProvider(config, providerName);
   const body = readBodyJson(args.bodyFile);
   const normalizedBody = normalizeImageSizeInBody({
     ...body,
+    ...(args.stream !== undefined ? { stream: args.stream } : {}),
     ...(args.outImage ? { out_image: args.outImage } : {}),
   });
 
@@ -477,7 +501,12 @@ async function handleRequest(command: string | undefined, rest: string[], events
   };
 }
 
-async function handleTransparent(command: string | undefined, rest: string[], events: JsonEventWriter) {
+async function handleTransparent(
+  command: string | undefined,
+  rest: string[],
+  events: JsonEventWriter,
+  globalProvider?: string,
+) {
   if (command === "verify") {
     return runTransparentVerify(parseTransparentVerifyArgs(rest));
   }
@@ -490,7 +519,7 @@ async function handleTransparent(command: string | undefined, rest: string[], ev
     const providerSelection = resolveProviderName(
       config,
       Boolean(process.env[OPENAI_API_KEY_ENV]?.trim()),
-      args.provider,
+      args.provider ?? globalProvider,
     );
     const providerName = providerSelection.resolved;
     const provider = resolveProvider(config, providerName);
@@ -516,6 +545,7 @@ async function handleTransparent(command: string | undefined, rest: string[], ev
       threshold: args.threshold,
       softness: args.softness,
       spillSuppression: args.spillSuppression,
+      stream: args.stream,
       apiKey: provider.type === "codex" ? undefined : resolveApiKey(provider, args.apiKey),
       events,
     });
@@ -539,6 +569,7 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
     compression: undefined as number | undefined,
     moderation: undefined as string | undefined,
     n: undefined as number | undefined,
+    stream: undefined as boolean | undefined,
     refImages: [] as string[],
     mask: undefined as string | undefined,
   };
@@ -598,6 +629,9 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
       case "--n":
         state.n = Number(value);
         i += 1;
+        break;
+      case "--stream":
+        state.stream = true;
         break;
       case "--ref-image":
         state.refImages.push(value);
@@ -742,6 +776,7 @@ function parseTransparentGenerateArgs(rest: string[]) {
     quality: undefined as string | undefined,
     compression: undefined as number | undefined,
     moderation: undefined as string | undefined,
+    stream: undefined as boolean | undefined,
     method: "auto" as "auto" | "dual",
     profile: "generic",
     material: undefined as string | undefined,
@@ -794,6 +829,9 @@ function parseTransparentGenerateArgs(rest: string[]) {
       case "--moderation":
         state.moderation = value;
         i += 1;
+        break;
+      case "--stream":
+        state.stream = true;
         break;
       case "--method":
         state.method = value === "dual" ? "dual" : "auto";
@@ -856,6 +894,7 @@ function parseRequestCreateArgs(rest: string[]) {
     outImage: undefined as string | undefined,
     previewOutImage: undefined as string | undefined,
     expectImage: false,
+    stream: undefined as boolean | undefined,
   };
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
@@ -888,6 +927,9 @@ function parseRequestCreateArgs(rest: string[]) {
       case "--expect-image":
         state.expectImage = true;
         break;
+      case "--stream":
+        state.stream = true;
+        break;
       default:
         throw new CliError("invalid_command", `Unknown argument: ${arg}`);
     }
@@ -908,6 +950,7 @@ function parseConfigAddProviderArgs(rest: string[]) {
     accountId: undefined as string | undefined,
     accessToken: undefined as string | undefined,
     refreshToken: undefined as string | undefined,
+    stream: undefined as boolean | undefined,
     supportsN: false,
     noSupportsN: false,
     editRegionMode: undefined as string | undefined,
@@ -956,6 +999,9 @@ function parseConfigAddProviderArgs(rest: string[]) {
       case "--refresh-token":
         state.refreshToken = value;
         i += 1;
+        break;
+      case "--stream":
+        state.stream = true;
         break;
       case "--supports-n":
         state.supportsN = true;

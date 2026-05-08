@@ -91,7 +91,7 @@ if [ "$USE_LOCAL_RUNTIME" = "1" ]; then
 fi
 ```
 
-Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`; leave the default `--provider auto` to use `default_provider` first. Override the legacy OpenAI base URL with `--openai-api-base https://...`.
+Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`. You can place `--provider <id>` before the command group or inside the subcommand; leave the default `--provider auto` to use `default_provider` first. Streaming now defaults to off; pass `--stream` when you want SSE/streaming behavior for a single request, or persist it on a provider via `config add-provider --stream`.
 
 ## Runtime consistency check
 

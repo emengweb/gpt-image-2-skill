@@ -115,6 +115,7 @@ export async function runTransparentGenerate(input: {
   softness?: number;
   spillSuppression?: number;
   apiKey?: string;
+  stream?: boolean;
   events: JsonEventWriter;
 }) {
   if ((input.method ?? "chroma") === "dual") {
@@ -140,6 +141,7 @@ export async function runTransparentGenerate(input: {
       quality: input.quality,
       format: "png",
       compression: input.compression,
+      stream: input.stream,
       events: input.events,
     });
     sourceGeneration = {
@@ -174,6 +176,7 @@ export async function runTransparentGenerate(input: {
         background: "opaque",
         compression: input.compression,
         moderation: input.moderation,
+        stream: input.stream,
       },
       new AbortController().signal,
       input.events,

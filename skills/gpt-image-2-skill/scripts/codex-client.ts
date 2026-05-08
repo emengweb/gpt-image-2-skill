@@ -96,6 +96,7 @@ export async function runCodexImageCommand(input: {
   quality?: string;
   format?: string;
   compression?: number;
+  stream?: boolean;
   events: JsonEventWriter;
 }) {
   const authState = loadCodexAuthState(input.providerName);
@@ -110,6 +111,7 @@ export async function runCodexImageCommand(input: {
     quality: input.quality,
     outputFormat: input.format,
     outputCompression: input.compression,
+    stream: input.stream ?? input.provider.stream ?? false,
     action: input.command,
   });
   const outcome = await requestCodexWithRetry(
@@ -211,6 +213,7 @@ export function buildCodexImageBody(input: {
   quality?: string;
   outputFormat?: string;
   outputCompression?: number;
+  stream?: boolean;
   action: string;
 }) {
   const content = input.refImages.map((imageUrl) => ({
@@ -234,7 +237,7 @@ export function buildCodexImageBody(input: {
     model: input.model,
     instructions: input.instructions,
     store: false,
-    stream: true,
+    stream: input.stream ?? false,
     input: [
       {
         role: "user",

@@ -77,13 +77,27 @@ function writeRgbaPng(filePath: string, width: number, height: number, painter: 
   fs.writeFileSync(filePath, PNG.sync.write(png, { colorType: 6 }));
 }
 
-test("generate body defaults to response_format=b64_json and stream=true", () => {
+test("generate body defaults to response_format=b64_json and stream=false", () => {
   const body = buildGenerateBody(provider(), {
     prompt: "hello",
     out: "/tmp/out.png",
   });
   assert.equal(body.response_format, "b64_json");
-  assert.equal(body.stream, true);
+  assert.equal(body.stream, false);
+});
+
+test("generate body honors provider stream config and explicit --stream style override", () => {
+  const providerStreamBody = buildGenerateBody(provider({ stream: true }), {
+    prompt: "hello",
+    out: "/tmp/out.png",
+  });
+  assert.equal(providerStreamBody.stream, true);
+  const explicitBody = buildGenerateBody(provider({ stream: false }), {
+    prompt: "hello",
+    out: "/tmp/out.png",
+    stream: true,
+  });
+  assert.equal(explicitBody.stream, true);
 });
 
 test("size normalization expands scalar and alias inputs", () => {
@@ -786,7 +800,7 @@ test("loadImageSourceBytes sends the configured user agent header for remote sou
   }
 });
 
-test("cli images generate sends response_format=b64_json and stream=true", () => {
+test("cli images generate sends response_format=b64_json and stream=false by default", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
   const codexHome = path.join(tempDir, ".codex");
   const configDir = path.join(codexHome, "gpt-image-2-skill");
@@ -849,6 +863,88 @@ globalThis.fetch = async (input, init = {}) => {
     assert.equal(result.status, 0, result.stderr);
     const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
     assert.equal(capture.body.response_format, "b64_json");
+    assert.equal(capture.body.stream, false);
+    assert.ok(fs.statSync(outPath).size > 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("cli images generate sends stream=true when --stream is provided", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const captureFile = path.join(tempDir, "capture.json");
+  const outPath = path.join(tempDir, "out-stream.png");
+  const fetchStubPath = path.join(tempDir, "fetch-stream-stub.cjs");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      default_provider: "mock",
+      providers: {
+        mock: {
+          type: "openai-compatible",
+          api_base: "https://mock.example/v1",
+          model: "gpt-image-2",
+          stream: false,
+          supports_n: true,
+          credentials: {
+            api_key: { source: "file", value: "sk-test" },
+          },
+        },
+      },
+    }),
+  );
+  fs.writeFileSync(
+    fetchStubPath,
+    `
+const fs = require("node:fs");
+const captureFile = process.env.TEST_CAPTURE_FILE;
+globalThis.fetch = async (input, init = {}) => {
+  fs.writeFileSync(captureFile, JSON.stringify({
+    url: String(input),
+    body: JSON.parse(String(init.body))
+  }));
+  return new Response(JSON.stringify({
+    created: 1,
+    data: [{ b64_json: ${JSON.stringify(tinyPngBase64)} }]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+};
+`,
+  );
+  try {
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "images",
+        "generate",
+        "--stream",
+        "--prompt",
+        "apple",
+        "--out",
+        outPath,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
     assert.equal(capture.body.stream, true);
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {
@@ -1115,6 +1211,7 @@ test("config add-provider persists sanitized provider config", () => {
         "https://mock.example/v1",
         "--api-key",
         "sk-secret",
+        "--stream",
         "--set-default",
       ],
       {
@@ -1130,6 +1227,7 @@ test("config add-provider persists sanitized provider config", () => {
     assert.equal(payload.command, "config add-provider");
     assert.equal(payload.provider, "mock2");
     assert.equal(payload.config.default_provider, "mock2");
+    assert.equal(payload.config.providers.mock2.stream, true);
     assert.equal(payload.config.providers.mock2.credentials.api_key.present, true);
     assert.equal(payload.config.providers.mock2.credentials.api_key.value, undefined);
   } finally {
@@ -1224,6 +1322,105 @@ globalThis.fetch = async (input, init = {}) => {
     assert.equal(payload.size_normalization.requested, "5120*5120");
     assert.equal(payload.size_normalization.resolved, "2880x2880");
     assert.equal(payload.size_normalization.oversize_adjusted, true);
+    assert.ok(fs.statSync(outPath).size > 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("global --provider is honored by request create", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const captureFile = path.join(tempDir, "capture.json");
+  const outPath = path.join(tempDir, "req-provider-out.png");
+  const bodyFile = path.join(tempDir, "body.json");
+  const fetchStubPath = path.join(tempDir, "fetch-stub.cjs");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      default_provider: "default-provider",
+      providers: {
+        "default-provider": {
+          type: "openai-compatible",
+          api_base: "https://default.example/v1",
+          model: "gpt-image-2",
+          supports_n: true,
+          credentials: {
+            api_key: { source: "file", value: "sk-default" },
+          },
+        },
+        "custom-provider-id": {
+          type: "openai-compatible",
+          api_base: "https://custom.example/v1",
+          model: "gpt-image-2",
+          supports_n: true,
+          credentials: {
+            api_key: { source: "file", value: "sk-custom" },
+          },
+        },
+      },
+    }),
+  );
+  fs.writeFileSync(bodyFile, JSON.stringify({ model: "gpt-image-2", prompt: "apple" }));
+  fs.writeFileSync(
+    fetchStubPath,
+    `
+const fs = require("node:fs");
+globalThis.fetch = async (input, init = {}) => {
+  fs.writeFileSync(process.env.TEST_CAPTURE_FILE, JSON.stringify({
+    url: String(input),
+    body: JSON.parse(String(init.body))
+  }));
+  return new Response(JSON.stringify({
+    created: 1,
+    data: [{ b64_json: ${JSON.stringify(tinyPngBase64)} }]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+};
+`,
+  );
+  try {
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [
+        "--require",
+        fetchStubPath,
+        cliPath,
+        "--json",
+        "--provider",
+        "custom-provider-id",
+        "request",
+        "create",
+        "--request-operation",
+        "generate",
+        "--body-file",
+        bodyFile,
+        "--out-image",
+        outPath,
+        "--expect-image",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          TEST_CAPTURE_FILE: captureFile,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    const capture = JSON.parse(fs.readFileSync(captureFile, "utf8"));
+    assert.equal(payload.provider, "custom-provider-id");
+    assert.equal(payload.provider_selection.requested, "custom-provider-id");
+    assert.equal(payload.provider_selection.resolved, "custom-provider-id");
+    assert.equal(capture.url, "https://custom.example/v1/images/generations");
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1341,13 +1538,28 @@ globalThis.fetch = async () => new Response(JSON.stringify({
   }
 });
 
-test("buildCodexImageBody defaults stream=true and image_generation tool", () => {
+test("buildCodexImageBody defaults stream=false and image_generation tool", () => {
   const body = buildCodexImageBody({
     prompt: "codex apple",
     model: "gpt-5.4",
     instructions: "You are a concise assistant.",
     refImages: [],
     background: "auto",
+    action: "generate",
+  });
+  assert.equal(body.stream, false);
+  assert.equal(Array.isArray(body.tools), true);
+  assert.equal((body.tools[0] as { type: string }).type, "image_generation");
+});
+
+test("buildCodexImageBody honors explicit stream=true", () => {
+  const body = buildCodexImageBody({
+    prompt: "codex apple",
+    model: "gpt-5.4",
+    instructions: "You are a concise assistant.",
+    refImages: [],
+    background: "auto",
+    stream: true,
     action: "generate",
   });
   assert.equal(body.stream, true);

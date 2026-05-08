@@ -67,7 +67,7 @@ export function buildGenerateBody(provider: ProviderConfig, options: GenerateOpt
     model: provider.model || "gpt-image-2",
     prompt: options.prompt,
     response_format: options.responseFormat ?? "b64_json",
-    stream: options.stream ?? true,
+    stream: options.stream ?? provider.stream ?? false,
   };
   addField(body, "size", options.size ? normalizeAndValidateImageSize(options.size) : undefined);
   addField(body, "quality", options.quality);
@@ -119,7 +119,7 @@ export async function requestEdit(
     model: provider.model || "gpt-image-2",
     prompt: options.prompt,
     response_format: options.responseFormat ?? "b64_json",
-    stream: options.stream ?? true,
+    stream: options.stream ?? provider.stream ?? false,
     images: options.refImages,
   };
   addField(body, "size", options.size ? normalizeAndValidateImageSize(options.size) : undefined);
@@ -149,7 +149,7 @@ export async function requestEdit(
       model: provider.model || "gpt-image-2",
       prompt: options.prompt,
       response_format: options.responseFormat ?? "b64_json",
-      stream: options.stream ?? true,
+      stream: options.stream ?? provider.stream ?? false,
       ref_image_count: options.refImages.length,
       mask_present: Boolean(options.mask),
       output_format: options.format,

@@ -70,6 +70,7 @@ export function defaultConfig(): AppConfig {
       type: "openai",
       api_base: process.env.OPENAI_API_BASE?.trim() || DEFAULT_OPENAI_API_BASE,
       model: DEFAULT_OPENAI_MODEL,
+      stream: false,
       supports_n: true,
       edit_region_mode: "native-mask",
       credentials: {
@@ -86,6 +87,7 @@ export function defaultConfig(): AppConfig {
     type: "codex",
     endpoint: DEFAULT_CODEX_ENDPOINT,
     model: DEFAULT_CODEX_MODEL,
+    stream: false,
     edit_region_mode: "reference-hint",
     credentials: {},
     builtin: true,
@@ -107,6 +109,7 @@ export function sanitizeConfig(config: AppConfig): AppConfig {
         name,
         {
           ...provider,
+          stream: provider.stream,
           credentials: Object.fromEntries(
             Object.entries(provider.credentials).map(([key, credential]) => [
               key,
@@ -179,6 +182,7 @@ export function resolveProvider(config: AppConfig, providerName: string): Provid
         type: "openai",
         api_base: process.env.OPENAI_API_BASE?.trim() || DEFAULT_OPENAI_API_BASE,
         model: DEFAULT_OPENAI_MODEL,
+        stream: false,
         supports_n: true,
         edit_region_mode: "native-mask",
         credentials: {
@@ -198,6 +202,7 @@ export function resolveProvider(config: AppConfig, providerName: string): Provid
         type: "codex",
         endpoint: DEFAULT_CODEX_ENDPOINT,
         model: DEFAULT_CODEX_MODEL,
+        stream: false,
         edit_region_mode: "reference-hint",
         credentials: {},
         builtin: true,

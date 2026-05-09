@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CRATE_NAME="gpt-image-2-skill"
-CRATE_MANIFEST="$ROOT_DIR/crates/$CRATE_NAME/Cargo.toml"
+PACKAGE_DIR="$ROOT_DIR/skills/gpt-image-2-skill/scripts"
+PACKAGE_JSON="$PACKAGE_DIR/package.json"
 
 require_cmd() {
   local name="$1"
@@ -14,13 +14,7 @@ require_cmd() {
 }
 
 project_version() {
-  local version
-  version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$CRATE_MANIFEST" | head -n1)"
-  if [[ -z "$version" ]]; then
-    echo "version not found in $CRATE_MANIFEST" >&2
-    exit 1
-  fi
-  printf '%s\n' "$version"
+  node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!pkg.version){process.exit(1)} console.log(pkg.version)' "$PACKAGE_JSON"
 }
 
 project_tag() {

@@ -1,1 +1,0 @@
-调试界面视觉与交互时，优先使用带 HTTP 后端的 Web 开发模式：先在仓库根目录执行 `just dev-http-backend` 启动共享本机 `~/.codex/gpt-image-2-skill` 历史的 `127.0.0.1:8787` 后端，再执行 `just dev-http-frontend` 打开 `127.0.0.1:5173`；只有需要验证 Tauri 专属能力时才启动 Tauri 开发服务器。

@@ -9,12 +9,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Install cargo-dist
-        run: cargo install cargo-dist --locked --version 0.31.0
+          cache: npm
+          cache-dependency-path: |
+            skills/gpt-image-2-skill/scripts/package-lock.json
+            apps/gpt-image-2-app/package-lock.json
+            workers/gpt-image-2-relay/package-lock.json
       - name: Prepare release candidate
         run: scripts/release/prepare.sh

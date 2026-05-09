@@ -1,7 +1,27 @@
 {
-  "name": "gpt-image-2-skill-scripts",
-  "private": true,
+  "name": "gpt-image-2-skill",
+  "version": "0.3.8",
+  "description": "Agent-first GPT Image 2 CLI for OpenAI API keys and Codex auth.",
+  "license": "MIT",
+  "homepage": "https://github.com/emengweb/gpt-image-2-skill",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/emengweb/gpt-image-2-skill.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
+  "bin": {
+    "gpt-image-2-skill": "gpt_image_2_skill.cjs"
+  },
+  "files": [
+    "*.cjs",
+    "*.ts",
+    "*.d.ts",
+    "README.md",
+    "package.json"
+  ],
   "dependencies": {
     "jpeg-js": "^0.4.4",
     "pngjs": "^7.0.0"

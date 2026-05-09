@@ -21,7 +21,6 @@ Common `code` values:
 
 | Code | Layer | Meaning |
 |---|---|---|
-| `runtime_unavailable` | wrapper | Node wrapper could not resolve a Rust binary |
 | `invalid_command` | clap | unknown flag, missing required arg, or `--size` value rejected by clap-level parsing (e.g. `5000x5000` is not a multiple of 16) |
 | `invalid_argument` | runtime | business-layer validation failure after clap accepted the input |
 | `unsupported_option` | runtime | flag passed to a provider that does not accept it (e.g. `--mask` with `--provider codex`) |

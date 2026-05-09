@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CliError, asError } from "./errors.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { JsonError } from "./types.ts";
@@ -37,6 +39,22 @@ import {
   runTransparentVerify,
 } from "./transparent-client.ts";
 
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_JSON_PATH = path.join(SCRIPT_DIR, "package.json");
+
+function readCliVersion() {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(PACKAGE_JSON_PATH, "utf8"),
+    ) as { version?: string };
+    return parsed.version?.trim() || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const CLI_VERSION = readCliVersion();
+
 export async function runCli(argv: string[]) {
   const flags = parseGlobalFlags(argv);
   const events = new JsonEventWriter(flags.jsonEvents);
@@ -58,7 +76,7 @@ export async function runCli(argv: string[]) {
 async function dispatch(argv: string[], events: JsonEventWriter, globalProvider?: string) {
   const [group, command, ...rest] = argv;
   if (!group) throw new CliError("invalid_command", "Missing command.");
-  if (group === "--version" || group === "version") return "0.3.8-ts";
+  if (group === "--version" || group === "version") return CLI_VERSION;
   if (group === "config") return handleConfig(command, rest);
   if (group === "auth") return handleAuth(command);
   if (group === "doctor") return handleDoctor(rest, globalProvider);

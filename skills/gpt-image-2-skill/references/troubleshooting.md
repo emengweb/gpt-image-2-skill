@@ -2,20 +2,18 @@
 
 Decision tree for the most common failures. Always run `--json doctor` first to confirm runtime, provider auth, and retry policy in one shot.
 
-## `runtime_unavailable`
+## `gpt-image-2-skill: command not found`
 
-The Node wrapper could not resolve a Rust binary.
-
-Resolution order is: `GPT_IMAGE_2_SKILL_BIN` → `PATH` → Tauri App bundled CLI → repo-local `cargo run` → cached release binary → bootstrap download.
+The TypeScript CLI is not installed or is missing from `PATH`.
 
 Fixes:
 
-- `cargo install gpt-image-2-skill --locked`
-- `brew install wangnov/tap/gpt-image-2-skill`
 - `npm install --global gpt-image-2-skill`
-- or set `GPT_IMAGE_2_SKILL_BIN=/abs/path/to/gpt-image-2-skill`
+- or run the repo-local launcher directly:
 
-If bootstrap is undesirable in CI, set `GPT_IMAGE_2_SKILL_SKIP_BOOTSTRAP=1`.
+```bash
+node skills/gpt-image-2-skill/scripts/gpt_image_2_skill.cjs --json doctor
+```
 
 ## Documented command is missing
 
@@ -30,7 +28,7 @@ gpt-image-2-skill --version || true
 node scripts/gpt_image_2_skill.cjs --version
 ```
 
-If `/Applications/GPT Image 2.app/Contents/Resources/bin/gpt-image-2-skill` exists but is older than upstream, ask the user before updating or replacing the app bundle. If no app bundle exists and the shell CLI is missing or stale, update the CLI silently:
+If the shell CLI is missing or stale, update it:
 
 ```bash
 npm install -g gpt-image-2-skill@latest
@@ -61,7 +59,7 @@ A `401` from the Codex endpoint triggers exactly one access-token refresh agains
 
 ## Retries and transient errors
 
-The runtime retries up to `DEFAULT_RETRY_COUNT = 3` times with exponential backoff (`1s → 2s → 4s`). Retried error classes are determined by `should_retry` in `lib.rs`; non-retryable errors fail fast.
+The runtime retries up to `DEFAULT_RETRY_COUNT = 3` times with exponential backoff (`1s → 2s → 4s`). Non-retryable errors fail fast.
 
 Watch retry behavior live with `--json-events` and grep stderr for `"phase":"retry_scheduled"`.
 

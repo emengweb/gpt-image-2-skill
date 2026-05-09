@@ -214,7 +214,7 @@ Load on demand for deeper detail:
 - `references/transparent-png.md` — Agent playbook for prompt design, controlled mattes, dual-background extraction, verification, and retry loops.
 - `references/json-output.md` — `--json` stdout schema, success and error envelopes, per-command shapes.
 - `references/json-events.md` — `--json-events` JSONL phases (`request_started`, `multipart_prepared`, `retry_scheduled`) and Codex SSE passthrough.
-- `references/troubleshooting.md` — `runtime_unavailable`, `auth_missing`, Codex `401` refresh, retry policy, size rejections, moderation, timeouts.
+- `references/troubleshooting.md` — install / command-not-found fixes, `auth_missing`, Codex `401` refresh, retry policy, size rejections, moderation, timeouts.
 
 ## Codex compatibility
 

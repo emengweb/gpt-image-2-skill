@@ -17,16 +17,7 @@ if ! npm whoami >/dev/null 2>&1; then
   exit 1
 fi
 
-PACKAGES=(
-  gpt-image-2-skill
-  gpt-image-2-skill-darwin-arm64
-  gpt-image-2-skill-darwin-x64
-  gpt-image-2-skill-linux-arm64-gnu
-  gpt-image-2-skill-linux-x64-gnu
-  gpt-image-2-skill-windows-arm64-msvc
-  gpt-image-2-skill-windows-x64-msvc
-)
-
+PACKAGES=(gpt-image-2-skill)
 REPO="${REPO:-Wangnov/gpt-image-2-skill}"
 WORKFLOW_FILE="${WORKFLOW_FILE:-npm-publish.yml}"
 
@@ -35,9 +26,7 @@ read_trust_field() {
   local field="$2"
   TRUST_JSON="$json" TRUST_FIELD="$field" node - <<'NODE'
 const raw = process.env.TRUST_JSON ?? "";
-if (!raw.trim()) {
-  process.exit(0);
-}
+if (!raw.trim()) process.exit(0);
 const data = JSON.parse(raw);
 const key = process.env.TRUST_FIELD;
 if (data && typeof data === "object" && key in data) {

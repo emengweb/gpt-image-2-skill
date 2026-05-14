@@ -1982,6 +1982,36 @@ test("transparent extract can recover a soft shadow alpha from a single matte-ba
   }
 });
 
+test("transparent extract pads effect-profile outputs so soft shadows do not touch the image edge", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "edge-shadow-source.png");
+  const outPath = path.join(tempDir, "edge-shadow-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const shadow: [number, number, number] = [160, 18, 158];
+  writeRgbaPng(inputPath, 12, 12, (x, y) => {
+    if (x <= 4 && y >= 4 && y <= 8) return [shadow[0], shadow[1], shadow[2], 255];
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  try {
+    const payload = await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "shadow",
+      matteColor: "#f90ef2",
+      strict: true,
+    });
+    assert.equal(payload.verification.passed, true);
+    assert.equal(payload.verification.touches_edge, false);
+    assert.ok(payload.verification.edge_margin_px !== null && payload.verification.edge_margin_px >= 64);
+    const output = readPng(outPath);
+    assert.ok(output.width > 12);
+    assert.ok(output.height > 12);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("runCodexRequestCreate emits aligned SSE and progress events for a successful streamed image response", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
   const outPath = path.join(tempDir, "codex.png");

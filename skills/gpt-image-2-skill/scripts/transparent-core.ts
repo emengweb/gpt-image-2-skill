@@ -15,6 +15,7 @@ const NONTRANSPARENT_ALPHA_MIN = 20;
 const MIN_TRANSPARENT_RATIO = 0.005;
 const STRICT_MIN_TRANSPARENT_RATIO = 0.05;
 const MIN_OPAQUE_ALPHA = 250;
+const EFFECT_PROFILE_MARGIN_PX = 64;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 export type TransparentProfile =
@@ -179,13 +180,27 @@ export function controlledMattePrompt(prompt: string, matte: string) {
   return `${prompt}\n\nExtraction setup: render exactly one isolated asset, centered with a clear margin, on a perfectly flat uniform matte background of pure ${color}. Do not use gradients, texture, vignette, shadows, reflections, contact shadows, scenery, props, labels, frames, or background-colored details. Keep the full subject visible and separated from the matte.`;
 }
 
-export function extractChromaFile(inputPath: string, outputPath: string, matteColor: string | null, settings: ChromaSettings): ExtractionReport {
+export function extractChromaFile(
+  inputPath: string,
+  outputPath: string,
+  matteColor: string | null,
+  settings: ChromaSettings,
+  profile: TransparentProfile = "generic",
+): ExtractionReport {
   const image = loadImage(inputPath);
   const matte = matteColor ? parseMatteColor(matteColor) : estimateMatteColor(image);
   const matteSource = matteColor ? "provided" : "auto-sampled";
-  const output = extractChroma(image, matte, settings.threshold, settings.softness, settings.spill_suppression);
-  scrubTransparentRgb(output);
-  writePng(normalizePngOutputPath(outputPath), output);
+  const output = extractChroma(
+    image,
+    matte,
+    settings.threshold,
+    settings.softness,
+    settings.spill_suppression,
+    profile,
+  );
+  const finalOutput = addEffectProfileMargin(output, profile);
+  scrubTransparentRgb(finalOutput);
+  writePng(normalizePngOutputPath(outputPath), finalOutput);
   return {
     method: "chroma",
     inputs: { input: inputPath },
@@ -202,7 +217,12 @@ export function extractChromaFile(inputPath: string, outputPath: string, matteCo
   };
 }
 
-export function extractDualFile(darkPath: string, lightPath: string, outputPath: string): ExtractionReport {
+export function extractDualFile(
+  darkPath: string,
+  lightPath: string,
+  outputPath: string,
+  profile: TransparentProfile = "generic",
+): ExtractionReport {
   const dark = loadImage(darkPath);
   const light = loadImage(lightPath);
   if (dark.width !== light.width || dark.height !== light.height) {
@@ -219,8 +239,9 @@ export function extractDualFile(darkPath: string, lightPath: string, outputPath:
   }
   const alignment = dualAlignmentReport(dark, light);
   const output = extractDual(dark, light);
-  scrubTransparentRgb(output);
-  writePng(normalizePngOutputPath(outputPath), output);
+  const finalOutput = addEffectProfileMargin(output, profile);
+  scrubTransparentRgb(finalOutput);
+  writePng(normalizePngOutputPath(outputPath), finalOutput);
   return {
     method: "dual",
     inputs: { dark_image: darkPath, light_image: lightPath },
@@ -458,7 +479,14 @@ function chromaPreset(material: TransparentMaterial | null): ChromaSettings {
   }
 }
 
-function extractChroma(image: LoadedImage, matte: readonly [number, number, number], threshold: number, softness: number, spillSuppression: number): LoadedImage {
+function extractChroma(
+  image: LoadedImage,
+  matte: readonly [number, number, number],
+  threshold: number,
+  softness: number,
+  spillSuppression: number,
+  profile: TransparentProfile,
+): LoadedImage {
   const low = Math.max(0, threshold);
   const high = Math.max(low + 1, threshold + Math.max(1, softness));
   const output = cloneImage(image);
@@ -474,6 +502,8 @@ function extractChroma(image: LoadedImage, matte: readonly [number, number, numb
     output.data[index + 3] = out[3];
   });
   reduceMatteHalo(output, image, matte, spillSuppression);
+  recoverSingleMatteShadows(output, image, matte, profile);
+  neutralizeShadowMatteResidue(output, image, matte, profile);
   output.hasAlpha = true;
   output.colorType = "Rgba8";
   output.format = "png";
@@ -503,6 +533,58 @@ function extractDual(dark: LoadedImage, light: LoadedImage): LoadedImage {
     output.data[index + 3] = alpha;
   }
   return output;
+}
+
+function addEffectProfileMargin(image: LoadedImage, profile: TransparentProfile) {
+  if (!["shadow", "glow", "translucent", "effect"].includes(profile)) return image;
+  const bbox = nontransparentBounds(image);
+  if (!bbox) return image;
+  const margin = Math.min(
+    bbox.x,
+    bbox.y,
+    image.width - (bbox.x + bbox.width),
+    image.height - (bbox.y + bbox.height),
+  );
+  if (margin >= EFFECT_PROFILE_MARGIN_PX) return image;
+  const pad = EFFECT_PROFILE_MARGIN_PX - margin;
+  const output = createImage(image.width + pad * 2, image.height + pad * 2);
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const sourceIndex = offset(image.width, x, y);
+      const targetIndex = offset(output.width, x + pad, y + pad);
+      output.data[targetIndex] = image.data[sourceIndex];
+      output.data[targetIndex + 1] = image.data[sourceIndex + 1];
+      output.data[targetIndex + 2] = image.data[sourceIndex + 2];
+      output.data[targetIndex + 3] = image.data[sourceIndex + 3];
+    }
+  }
+  output.hasAlpha = true;
+  output.colorType = "Rgba8";
+  output.format = "png";
+  return output;
+}
+
+function nontransparentBounds(image: LoadedImage) {
+  let minX = image.width;
+  let minY = image.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      if (pixelAlpha(image, x, y) <= TRANSPARENT_ALPHA_MAX) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX || maxY < minY) return null;
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
 }
 
 function decontaminatePixel(source: readonly number[], matte: readonly [number, number, number], alpha: number, spillSuppression: number) {
@@ -621,6 +703,154 @@ function reduceMatteHalo(
   }
 }
 
+function recoverSingleMatteShadows(
+  image: LoadedImage,
+  source: LoadedImage,
+  matte: readonly [number, number, number],
+  profile: TransparentProfile,
+) {
+  if (profile !== "shadow") return;
+  const matteStrength = Math.max(...matte) - Math.min(...matte);
+  if (matteStrength < 96) return;
+  const snapshot = cloneImage(image);
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const index = offset(image.width, x, y);
+      const alpha = snapshot.data[index + 3];
+      if (alpha <= TRANSPARENT_ALPHA_MAX) continue;
+      const observed = [
+        source.data[index],
+        source.data[index + 1],
+        source.data[index + 2],
+      ] as const;
+      const shadow = estimateShadowFromSingleMatte(observed, matte);
+      if (!shadow) continue;
+      const current = [snapshot.data[index], snapshot.data[index + 1], snapshot.data[index + 2]] as const;
+      const currentChroma = colorChroma(current);
+      const currentLuma = colorLuma(current);
+      if (currentChroma < 0.16 && currentLuma < 0.72 && alpha < 245) continue;
+      const blend = alpha >= 250 ? 0.95 : 0.75;
+      const nextAlpha = Math.min(alpha, shadow.alpha);
+      if (nextAlpha <= TRANSPARENT_ALPHA_MAX) continue;
+      image.data[index] = Math.round(lerp(current[0], shadow.color, blend));
+      image.data[index + 1] = Math.round(lerp(current[1], shadow.color, blend));
+      image.data[index + 2] = Math.round(lerp(current[2], shadow.color, blend));
+      image.data[index + 3] = nextAlpha;
+    }
+  }
+}
+
+function estimateShadowFromSingleMatte(observed: readonly number[], matte: readonly [number, number, number]) {
+  if (!isMatteCompatibleObserved(observed, matte)) return null;
+  const neutral = estimateNeutralMatteComposite(observed, matte);
+  if (!neutral) return estimateDominantChannelShadow(observed, matte);
+  const alpha = Math.round(clamp(0, 235, neutral.alpha * 255));
+  if (alpha <= TRANSPARENT_ALPHA_MAX) return null;
+  const observedChroma = colorChroma(observed);
+  const observedLuma = colorLuma(observed);
+  if (neutral.chroma > 0.16 && observedChroma > 0.22) {
+    return estimateDominantChannelShadow(observed, matte);
+  }
+  const color = Math.round(clamp(0, 180, Math.min(neutral.luma, observedLuma) * 255));
+  return { alpha, color };
+}
+
+function estimateDominantChannelShadow(observed: readonly number[], matte: readonly [number, number, number]) {
+  const dominant = dominantMatteChannels(matte);
+  if (dominant.length < 1) return null;
+  let drop = 0;
+  for (const channel of dominant) {
+    drop += Math.max(0, matte[channel] - observed[channel]) / Math.max(1, matte[channel]);
+  }
+  drop /= dominant.length;
+  if (drop < 0.08) return null;
+  const alpha = Math.round(clamp(0, 235, drop * 255));
+  if (alpha <= TRANSPARENT_ALPHA_MAX) return null;
+  const restored = decontaminatePixel([observed[0], observed[1], observed[2], 255], matte, alpha, 0);
+  const restoredChroma = colorChroma(restored);
+  const restoredLuma = colorLuma(restored);
+  const observedChroma = colorChroma(observed);
+  const observedLuma = colorLuma(observed);
+  if (restoredChroma > 0.28 && observedChroma > 0.25) return null;
+  const color = Math.round(clamp(0, 180, Math.min(restoredLuma, observedLuma) * 255));
+  return { alpha, color };
+}
+
+function estimateNeutralMatteComposite(observed: readonly number[], matte: readonly [number, number, number]) {
+  const alphaEstimates: number[] = [];
+  for (let a = 0; a < 3; a += 1) {
+    for (let b = a + 1; b < 3; b += 1) {
+      const matteDelta = matte[a] - matte[b];
+      if (Math.abs(matteDelta) < 32) continue;
+      const observedDelta = observed[a] - observed[b];
+      const retainedMatte = observedDelta / matteDelta;
+      if (!Number.isFinite(retainedMatte)) continue;
+      if (retainedMatte < -0.15 || retainedMatte > 1.05) continue;
+      alphaEstimates.push(clamp01(1 - retainedMatte));
+    }
+  }
+  if (alphaEstimates.length < 2) return null;
+  alphaEstimates.sort((a, b) => a - b);
+  const alpha = medianNumber(alphaEstimates);
+  const spread = alphaEstimates[alphaEstimates.length - 1] - alphaEstimates[0];
+  if (alpha < 0.06 || spread > 0.28) return null;
+  const recovered: number[] = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    recovered.push((observed[channel] - matte[channel] * (1 - alpha)) / Math.max(alpha, 0.001));
+  }
+  const clipError = recovered.reduce((sum, value) => {
+    if (value < 0) return sum - value;
+    if (value > 255) return sum + value - 255;
+    return sum;
+  }, 0);
+  if (clipError > 48) return null;
+  const clipped = recovered.map((value) => clamp(0, 255, value));
+  return {
+    alpha,
+    chroma: colorChroma(clipped),
+    luma: colorLuma(clipped),
+  };
+}
+
+function neutralizeShadowMatteResidue(
+  image: LoadedImage,
+  source: LoadedImage,
+  matte: readonly [number, number, number],
+  profile: TransparentProfile,
+) {
+  if (profile !== "shadow") return;
+  const dominant = dominantMatteChannels(matte);
+  if (dominant.length === 0) return;
+  const otherChannels = [0, 1, 2].filter((channel) => !dominant.includes(channel));
+  if (otherChannels.length === 0) return;
+  for (let index = 0; index < image.data.length; index += 4) {
+    const alpha = image.data[index + 3];
+    if (alpha <= TRANSPARENT_ALPHA_MAX) continue;
+    const current = [image.data[index], image.data[index + 1], image.data[index + 2]] as const;
+    const sourcePixel = [source.data[index], source.data[index + 1], source.data[index + 2]] as const;
+    const reference = Math.max(...otherChannels.map((channel) => current[channel]));
+    const excess =
+      dominant
+        .map((channel) => Math.max(0, current[channel] - reference))
+        .reduce((sum, value) => sum + value, 0) / dominant.length;
+    if (excess < 42) continue;
+    if (alpha >= MIN_OPAQUE_ALPHA && !isLooseMatteObserved(sourcePixel, matte)) continue;
+    const sourceSimilarity = matteSimilarity(sourcePixel, matte);
+    if (sourceSimilarity < 0.35 && !isLooseMatteObserved(sourcePixel, matte)) continue;
+    const neutral = Math.round(clamp(0, 210, Math.min(...current, reference)));
+    const strength = alpha >= MIN_OPAQUE_ALPHA ? 0.92 : 0.75;
+    image.data[index] = Math.round(lerp(current[0], neutral, strength));
+    image.data[index + 1] = Math.round(lerp(current[1], neutral, strength));
+    image.data[index + 2] = Math.round(lerp(current[2], neutral, strength));
+    if (alpha >= MIN_OPAQUE_ALPHA) {
+      const estimated = estimateMinimumAlphaFromMatteDifference(sourcePixel, matte);
+      if (estimated !== null) {
+        image.data[index + 3] = Math.min(alpha, Math.max(NONTRANSPARENT_ALPHA_MIN, Math.round(estimated * 255)));
+      }
+    }
+  }
+}
+
 function hasTransparentNeighbor(image: LoadedImage, x: number, y: number, radius: number) {
   for (let ny = Math.max(0, y - radius); ny <= Math.min(image.height - 1, y + radius); ny += 1) {
     for (let nx = Math.max(0, x - radius); nx <= Math.min(image.width - 1, x + radius); nx += 1) {
@@ -716,6 +946,20 @@ function isMatteCompatibleObserved(observed: readonly number[], matte: readonly 
     if (Math.abs(observed[channel] - matte[channel]) <= 80) closeChannels += 1;
   }
   return closeChannels >= 2;
+}
+
+function isLooseMatteObserved(observed: readonly number[], matte: readonly [number, number, number]) {
+  let closeChannels = 0;
+  for (let channel = 0; channel < 3; channel += 1) {
+    if (observed[channel] > matte[channel] + 64) return false;
+    if (Math.abs(observed[channel] - matte[channel]) <= 128) closeChannels += 1;
+  }
+  return closeChannels >= 2;
+}
+
+function dominantMatteChannels(matte: readonly [number, number, number]) {
+  const maxMatte = Math.max(...matte);
+  return [0, 1, 2].filter((channel) => matte[channel] >= maxMatte - 16);
 }
 
 function decontaminationClipError(source: readonly number[], matte: readonly [number, number, number], alpha: number) {
@@ -1110,6 +1354,13 @@ function median(values: number[]) {
   return values[Math.floor(values.length / 2)] ?? 0;
 }
 
+function medianNumber(values: number[]) {
+  if (values.length === 0) return 0;
+  const middle = Math.floor(values.length / 2);
+  if (values.length % 2 === 1) return values[middle] ?? 0;
+  return ((values[middle - 1] ?? 0) + (values[middle] ?? 0)) / 2;
+}
+
 function colorDistance(a: readonly number[], b: readonly number[]) {
   const red = a[0] - b[0];
   const green = a[1] - b[1];
@@ -1119,6 +1370,14 @@ function colorDistance(a: readonly number[], b: readonly number[]) {
 
 function matteSimilarity(color: readonly number[], matte: readonly number[]) {
   return clamp01(1 - colorDistance(color, matte) / (255 * Math.sqrt(3)));
+}
+
+function colorLuma(color: readonly number[]) {
+  return (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]) / 255;
+}
+
+function colorChroma(color: readonly number[]) {
+  return (Math.max(color[0], color[1], color[2]) - Math.min(color[0], color[1], color[2])) / 255;
 }
 
 function colorDistanceF64(a: readonly number[], b: readonly number[]) {

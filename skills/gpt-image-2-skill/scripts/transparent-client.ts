@@ -14,6 +14,7 @@ import {
   normalizePngOutputPath,
   parseMatteColorOrAuto,
   resolveChromaSettings,
+  type TransparentProfile,
   verifyTransparentFile,
 } from "./transparent-core.ts";
 
@@ -61,6 +62,7 @@ export async function runTransparentVerify(args: VerifyArgs) {
 export async function runTransparentExtract(args: ExtractArgs) {
   const method = resolveExtractMethod(args);
   const outPath = normalizePngOutputPath(args.out);
+  const profile = args.profile as TransparentProfile;
   const extraction =
     method === "chroma"
       ? extractChromaFile(
@@ -68,8 +70,9 @@ export async function runTransparentExtract(args: ExtractArgs) {
           outPath,
           args.matteColor ? (parseMatteColorOrAuto(args.matteColor) ? args.matteColor : null) : null,
           resolveChromaSettings(args.material, args.threshold, args.softness, args.spillSuppression),
+          profile,
         )
-      : extractDualFile(args.darkImage!, args.lightImage!, outPath);
+      : extractDualFile(args.darkImage!, args.lightImage!, outPath, profile);
   const verification = verifyTransparentFile(outPath, {
     profile: args.profile as any,
     expectedMatteColor: extraction.matte_color,
@@ -199,6 +202,7 @@ export async function runTransparentGenerate(input: {
     outPath,
     null,
     resolveChromaSettings(input.material, input.threshold, input.softness, input.spillSuppression),
+    (input.profile || "generic") as TransparentProfile,
   );
   const verification = verifyTransparentFile(outPath, {
     profile: (input.profile || "generic") as any,

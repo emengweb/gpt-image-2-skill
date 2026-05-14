@@ -473,6 +473,7 @@ function extractChroma(image: LoadedImage, matte: readonly [number, number, numb
     output.data[index + 2] = out[2];
     output.data[index + 3] = out[3];
   });
+  reduceMatteHalo(output, image, matte, spillSuppression);
   output.hasAlpha = true;
   output.colorType = "Rgba8";
   output.format = "png";
@@ -506,6 +507,9 @@ function extractDual(dark: LoadedImage, light: LoadedImage): LoadedImage {
 
 function decontaminatePixel(source: readonly number[], matte: readonly [number, number, number], alpha: number, spillSuppression: number) {
   if (alpha <= TRANSPARENT_ALPHA_MAX) return [0, 0, 0, 0] as const;
+  if (alpha >= 255) {
+    return [source[0], source[1], source[2], Math.min(alpha, source[3])] as const;
+  }
   const alphaFloat = alpha / 255;
   const out = [0, 0, 0, Math.min(alpha, source[3])] as [number, number, number, number];
   for (let channel = 0; channel < 3; channel += 1) {
@@ -524,6 +528,9 @@ function decontaminatePixel(source: readonly number[], matte: readonly [number, 
 function suppressMatteSpill(rgba: [number, number, number, number], matte: readonly [number, number, number], alpha: number, amount: number) {
   const clampedAmount = clamp01(amount);
   if (clampedAmount <= 0 || alpha <= TRANSPARENT_ALPHA_MAX) return;
+  // Keep fully opaque subject colors stable. Spill suppression is only meant to
+  // clean semi-transparent edge pixels that still carry the matte color.
+  if (alpha >= 255) return;
   const maxMatte = Math.max(...matte);
   const minMatte = Math.min(...matte);
   if (maxMatte < 192 || maxMatte - minMatte < 128) return;
@@ -540,6 +547,189 @@ function suppressMatteSpill(rgba: [number, number, number, number], matte: reado
     const excess = rgba[channel] - reference;
     rgba[channel] = Math.round(clamp(0, 255, rgba[channel] - excess * strength));
   }
+}
+
+function reduceMatteHalo(
+  image: LoadedImage,
+  source: LoadedImage,
+  matte: readonly [number, number, number],
+  spillSuppression: number,
+) {
+  const snapshot = cloneImage(image);
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const index = offset(image.width, x, y);
+      const alpha = snapshot.data[index + 3];
+      if (alpha <= TRANSPARENT_ALPHA_MAX) continue;
+      const sourcePixel = [
+        source.data[index],
+        source.data[index + 1],
+        source.data[index + 2],
+        source.data[index + 3],
+      ] as const;
+      const opaqueBoundaryPixel = alpha >= 255 && hasTransparentNeighbor(snapshot, x, y, 1);
+      const extendedBoundaryPixel = alpha >= 255 && hasTransparentNeighbor(snapshot, x, y, 2);
+      const current = [snapshot.data[index], snapshot.data[index + 1], snapshot.data[index + 2]] as const;
+      const sourceSimilarity = matteSimilarity(sourcePixel, matte);
+      const similarityThreshold = opaqueBoundaryPixel ? 0.55 : 0.45;
+      if (sourceSimilarity < similarityThreshold) continue;
+      const shadowLikeBoundaryPixel =
+        alpha >= 255 && extendedBoundaryPixel && isMatteCompatibleObserved(sourcePixel, matte);
+      if (alpha >= 255 && !opaqueBoundaryPixel && !shadowLikeBoundaryPixel) continue;
+      const neighbor = averageCleanerForegroundNeighbor(snapshot, x, y, matte, sourceSimilarity, alpha, 2);
+      const estimatedAlpha = neighbor ? estimateAlphaFromMatteMix(sourcePixel, neighbor, matte) : null;
+      if (estimatedAlpha !== null) {
+        const estimatedAlphaByte = Math.round(clamp(0, 255, estimatedAlpha * 255));
+        const refinedAlpha = Math.min(alpha, estimatedAlphaByte);
+        if (refinedAlpha + 2 < alpha) {
+          const out = decontaminatePixel(sourcePixel, matte, refinedAlpha, spillSuppression);
+          image.data[index] = out[0];
+          image.data[index + 1] = out[1];
+          image.data[index + 2] = out[2];
+          image.data[index + 3] = out[3];
+          continue;
+        }
+      }
+      const minimumAlpha = extendedBoundaryPixel ? estimateMinimumAlphaFromMatteDifference(sourcePixel, matte) : null;
+      if (minimumAlpha !== null) {
+        const targetAlpha = Math.round(clamp(0, 255, minimumAlpha * 255));
+        if (decontaminationClipError(sourcePixel, matte, targetAlpha) > 32) continue;
+        const alphaBlend = opaqueBoundaryPixel
+          ? clamp01((sourceSimilarity - similarityThreshold) / 0.2) * 0.95
+          : clamp01((sourceSimilarity - similarityThreshold) / 0.3) * 0.8;
+        const refinedAlpha = Math.round(lerp(alpha, Math.min(alpha, targetAlpha), alphaBlend));
+        if (refinedAlpha + 2 < alpha) {
+          const out = decontaminatePixel(sourcePixel, matte, refinedAlpha, spillSuppression);
+          image.data[index] = out[0];
+          image.data[index + 1] = out[1];
+          image.data[index + 2] = out[2];
+          image.data[index + 3] = out[3];
+          continue;
+        }
+      }
+      if (!neighbor) continue;
+      const similarity = matteSimilarity(current, matte);
+      if (similarity < similarityThreshold) continue;
+      const blendBase = opaqueBoundaryPixel
+        ? clamp01((similarity - similarityThreshold) / 0.3) * 0.6
+        : clamp01((similarity - similarityThreshold) / 0.4) * 0.9;
+      const blend = clamp01(blendBase);
+      image.data[index] = Math.round(lerp(current[0], neighbor[0], blend));
+      image.data[index + 1] = Math.round(lerp(current[1], neighbor[1], blend));
+      image.data[index + 2] = Math.round(lerp(current[2], neighbor[2], blend));
+    }
+  }
+}
+
+function hasTransparentNeighbor(image: LoadedImage, x: number, y: number, radius: number) {
+  for (let ny = Math.max(0, y - radius); ny <= Math.min(image.height - 1, y + radius); ny += 1) {
+    for (let nx = Math.max(0, x - radius); nx <= Math.min(image.width - 1, x + radius); nx += 1) {
+      if (nx === x && ny === y) continue;
+      const index = offset(image.width, nx, ny);
+      if (image.data[index + 3] <= TRANSPARENT_ALPHA_MAX) return true;
+    }
+  }
+  return false;
+}
+
+function averageCleanerForegroundNeighbor(
+  image: LoadedImage,
+  x: number,
+  y: number,
+  matte: readonly [number, number, number],
+  currentSimilarity: number,
+  currentAlpha: number,
+  radius: number,
+) {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let totalWeight = 0;
+  for (let ny = Math.max(0, y - radius); ny <= Math.min(image.height - 1, y + radius); ny += 1) {
+    for (let nx = Math.max(0, x - radius); nx <= Math.min(image.width - 1, x + radius); nx += 1) {
+      if (nx === x && ny === y) continue;
+      const index = offset(image.width, nx, ny);
+      const alpha = image.data[index + 3];
+      if (alpha <= TRANSPARENT_ALPHA_MAX) continue;
+      if (alpha + 8 < currentAlpha && alpha < MIN_OPAQUE_ALPHA) continue;
+      const rgb = [image.data[index], image.data[index + 1], image.data[index + 2]] as const;
+      const similarity = matteSimilarity(rgb, matte);
+      const cleanliness = clamp01(currentSimilarity - similarity);
+      if (cleanliness <= 0.05) continue;
+      const distance = Math.hypot(nx - x, ny - y);
+      const weight = cleanliness * (0.35 + alpha / 255 * 0.65) / Math.max(1, distance);
+      red += rgb[0] * weight;
+      green += rgb[1] * weight;
+      blue += rgb[2] * weight;
+      totalWeight += weight;
+    }
+  }
+  if (totalWeight === 0) return null;
+  return [
+    Math.round(red / totalWeight),
+    Math.round(green / totalWeight),
+    Math.round(blue / totalWeight),
+  ] as const;
+}
+
+function estimateAlphaFromMatteMix(
+  observed: readonly number[],
+  foreground: readonly number[],
+  matte: readonly [number, number, number],
+) {
+  const estimates: number[] = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    const denominator = foreground[channel] - matte[channel];
+    if (Math.abs(denominator) < 12) continue;
+    const estimate = (observed[channel] - matte[channel]) / denominator;
+    if (!Number.isFinite(estimate)) continue;
+    if (estimate < -0.25 || estimate > 1.25) continue;
+    estimates.push(clamp01(estimate));
+  }
+  if (!estimates.length) return null;
+  estimates.sort((a, b) => a - b);
+  return estimates[Math.floor(estimates.length / 2)];
+}
+
+function estimateMinimumAlphaFromMatteDifference(observed: readonly number[], matte: readonly [number, number, number]) {
+  const estimates: number[] = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    if (observed[channel] >= matte[channel]) {
+      const range = 255 - matte[channel];
+      if (range <= 0) continue;
+      estimates.push((observed[channel] - matte[channel]) / range);
+      continue;
+    }
+    const range = matte[channel];
+    if (range <= 0) continue;
+    estimates.push((matte[channel] - observed[channel]) / range);
+  }
+  if (!estimates.length) return null;
+  estimates.sort((a, b) => a - b);
+  return clamp01(estimates[Math.floor(estimates.length / 2)]);
+}
+
+function isMatteCompatibleObserved(observed: readonly number[], matte: readonly [number, number, number]) {
+  let closeChannels = 0;
+  for (let channel = 0; channel < 3; channel += 1) {
+    if (observed[channel] > matte[channel] + 24) return false;
+    if (Math.abs(observed[channel] - matte[channel]) <= 80) closeChannels += 1;
+  }
+  return closeChannels >= 2;
+}
+
+function decontaminationClipError(source: readonly number[], matte: readonly [number, number, number], alpha: number) {
+  const alphaFloat = Math.max(alpha / 255, 0.001);
+  let total = 0;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const raw = (source[channel] - matte[channel] * (1 - alphaFloat)) / alphaFloat;
+    if (raw < 0) {
+      total += -raw;
+    } else if (raw > 255) {
+      total += raw - 255;
+    }
+  }
+  return total;
 }
 
 function componentStats(image: LoadedImage) {
@@ -927,6 +1117,10 @@ function colorDistance(a: readonly number[], b: readonly number[]) {
   return Math.sqrt(red * red + green * green + blue * blue);
 }
 
+function matteSimilarity(color: readonly number[], matte: readonly number[]) {
+  return clamp01(1 - colorDistance(color, matte) / (255 * Math.sqrt(3)));
+}
+
 function colorDistanceF64(a: readonly number[], b: readonly number[]) {
   return colorDistance(a, b);
 }
@@ -1048,6 +1242,10 @@ function ratio(count: number, total: number) {
 
 function colorToHex(color: readonly number[]) {
   return `#${color.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
 }
 
 function clamp(min: number, max: number, value: number) {

@@ -9,7 +9,7 @@ import { buildGenerateBody, requestGenerate } from "./openai-client.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { ProviderConfig } from "./types.ts";
 import { buildCodexImageBody, runCodexImageCommand, runCodexRequestCreate } from "./codex-client.ts";
-import { runTransparentVerify } from "./transparent-client.ts";
+import { runTransparentExtract, runTransparentVerify } from "./transparent-client.ts";
 import { resolveUserAgent } from "./config-store.ts";
 import { normalizeAndValidateImageSize, normalizeImageSizeInBody } from "./image-size.ts";
 import { loadImageSourceBytes } from "./image-sources.ts";
@@ -75,6 +75,11 @@ function writeRgbaPng(filePath: string, width: number, height: number, painter: 
     }
   }
   fs.writeFileSync(filePath, PNG.sync.write(png, { colorType: 6 }));
+}
+
+function readPng(filePath: string) {
+  const { PNG } = require("pngjs") as typeof import("pngjs");
+  return PNG.sync.read(fs.readFileSync(filePath));
 }
 
 test("generate body defaults to response_format=b64_json and stream=false", () => {
@@ -1810,6 +1815,168 @@ test("matte residue score rises near threshold for expected-matte contamination 
     });
     assert.ok((contaminated.verification.matte_residue_score ?? 0) > (cleaned.verification.matte_residue_score ?? 0));
     assert.ok((contaminated.verification.matte_residue_score ?? 0) > 0.12);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract keeps fully opaque matte-adjacent colors unchanged while removing background", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-source.png");
+  const outPath = path.join(tempDir, "magenta-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [210, 73, 205];
+  writeRgbaPng(inputPath, 7, 7, (x, y) => {
+    if (x >= 2 && x <= 4 && y >= 2 && y <= 4) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  try {
+    const payload = await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      spillSuppression: 0.85,
+      strict: false,
+    });
+    assert.equal(payload.verification.passed, true);
+    const output = readPng(outPath);
+    const center = (3 * output.width + 3) * 4;
+    const centerPixel = Array.from(output.data.slice(center, center + 4));
+    assert.ok(Math.abs(centerPixel[0] - subject[0]) <= 16);
+    assert.ok(Math.abs(centerPixel[1] - subject[1]) <= 16);
+    assert.ok(Math.abs(centerPixel[2] - subject[2]) <= 16);
+    assert.equal(centerPixel[3], 255);
+    const background = (0 * output.width + 0) * 4;
+    assert.deepEqual(Array.from(output.data.slice(background, background + 4)), [0, 0, 0, 0]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract reduces saturated matte fringe on semi-transparent edge pixels", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-fringe-source.png");
+  const outPath = path.join(tempDir, "magenta-fringe-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [120, 230, 90];
+  const mixedEdge: [number, number, number] = [233, 66, 219];
+  writeRgbaPng(inputPath, 9, 9, (x, y) => {
+    if (x >= 3 && x <= 6 && y >= 2 && y <= 6) {
+      if (x === 3 && y === 4) return [mixedEdge[0], mixedEdge[1], mixedEdge[2], 255];
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  try {
+    await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      spillSuppression: 0.85,
+      strict: false,
+    });
+    const output = readPng(outPath);
+    const edgeIndex = (4 * output.width + 3) * 4;
+    const edge = Array.from(output.data.slice(edgeIndex, edgeIndex + 4));
+    assert.ok(edge[3] > 0 && edge[3] < 255);
+    const matteSimilarity = (rgb: number[]) => {
+      const distance = Math.sqrt(
+        (rgb[0] - matte[0]) ** 2 +
+          (rgb[1] - matte[1]) ** 2 +
+          (rgb[2] - matte[2]) ** 2,
+      );
+      return 1 - distance / (255 * Math.sqrt(3));
+    };
+    assert.ok(matteSimilarity(edge) < matteSimilarity(Array.from(mixedEdge)));
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract converts matte-mixed boundary pixels into semi-transparent edges without shifting interior subject color", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-opaque-boundary-source.png");
+  const outPath = path.join(tempDir, "magenta-opaque-boundary-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [120, 230, 90];
+  const edgeAlpha = 0.62;
+  const contaminatedEdge: [number, number, number] = [
+    Math.round(subject[0] * edgeAlpha + matte[0] * (1 - edgeAlpha)),
+    Math.round(subject[1] * edgeAlpha + matte[1] * (1 - edgeAlpha)),
+    Math.round(subject[2] * edgeAlpha + matte[2] * (1 - edgeAlpha)),
+  ];
+  writeRgbaPng(inputPath, 9, 9, (x, y) => {
+    if (x >= 2 && x <= 6 && y >= 2 && y <= 6) {
+      if (x === 2 && y === 2) return [contaminatedEdge[0], contaminatedEdge[1], contaminatedEdge[2], 255];
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  try {
+    await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      spillSuppression: 0.85,
+      strict: false,
+    });
+    const output = readPng(outPath);
+    const edgeIndex = (2 * output.width + 2) * 4;
+    const edge = Array.from(output.data.slice(edgeIndex, edgeIndex + 4));
+    const centerIndex = (4 * output.width + 4) * 4;
+    const center = Array.from(output.data.slice(centerIndex, centerIndex + 4));
+    assert.ok(edge[3] > 0 && edge[3] < 255);
+    assert.ok(Math.abs(edge[3] - Math.round(edgeAlpha * 255)) <= 24);
+    assert.ok(Math.abs(edge[0] - subject[0]) <= 20);
+    assert.ok(Math.abs(edge[1] - subject[1]) <= 20);
+    assert.ok(Math.abs(edge[2] - subject[2]) <= 20);
+    assert.deepEqual(center, [subject[0], subject[1], subject[2], 255]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract can recover a soft shadow alpha from a single matte-backed source", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-shadow-source.png");
+  const outPath = path.join(tempDir, "magenta-shadow-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const shadowColor: [number, number, number] = [28, 28, 28];
+  const shadowAlpha = 0.34;
+  const mixedShadow: [number, number, number] = [
+    Math.round(shadowColor[0] * shadowAlpha + matte[0] * (1 - shadowAlpha)),
+    Math.round(shadowColor[1] * shadowAlpha + matte[1] * (1 - shadowAlpha)),
+    Math.round(shadowColor[2] * shadowAlpha + matte[2] * (1 - shadowAlpha)),
+  ];
+  writeRgbaPng(inputPath, 7, 7, (x, y) => {
+    if (x >= 2 && x <= 4 && y >= 2 && y <= 4) return [mixedShadow[0], mixedShadow[1], mixedShadow[2], 255];
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  try {
+    await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      spillSuppression: 0.15,
+      strict: false,
+    });
+    const output = readPng(outPath);
+    const shadowIndex = (3 * output.width + 3) * 4;
+    const shadow = Array.from(output.data.slice(shadowIndex, shadowIndex + 4));
+    assert.ok(shadow[3] > 0 && shadow[3] < 255);
+    assert.ok(shadow[0] < matte[0]);
+    assert.ok(shadow[1] < matte[1] + 40);
+    assert.ok(shadow[2] < matte[2]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -6,8 +6,8 @@ Use this reference when the user asks for a final transparent-background PNG. Th
 
 | Command | Role |
 |---|---|
-| `transparent generate` | Prompt-to-final PNG. Generates one controlled matte source, extracts alpha locally, verifies, and fails if the final PNG is not usable. |
-| `transparent extract` | Local alpha extraction from controlled source images. Use this for difficult assets, custom source prompts, or multi-background flows. It is not a general-purpose remover for arbitrary photos. |
+| `transparent generate` | Prompt-to-final PNG. Generates one controlled matte source, tries integrated `background-remove` first, falls back to local chroma extraction when needed, verifies, and fails if the final PNG is not usable. |
+| `transparent extract` | Local alpha extraction with integrated `background-remove` first and built-in chroma/dual fallback. Use this for difficult assets, custom source prompts, arbitrary-photo cutouts, or multi-background flows. |
 | `transparent verify` | Final acceptance gate. Use `--strict` with the right `--profile` before delivery. |
 
 Do not treat provider-native `--background transparent` as the reliable path, especially with Codex. Controlled backgrounds plus local extraction are the reliable path.
@@ -16,9 +16,9 @@ A transparent deliverable is valid only if the final file has a real PNG alpha c
 
 ## Default loop
 
-1. Start with `transparent generate` for ordinary isolated assets.
-2. If verification fails, keep sources with `--report-dir` and inspect the source matte.
-3. Change the matte color or source prompt, then call `transparent extract`; prefer `--matte-color auto` for AI-generated flat backgrounds.
+1. Start with `transparent generate` for ordinary isolated assets; it will prefer integrated `background-remove` and only fall back when needed.
+2. If verification fails, keep sources with `--report-dir` and inspect the source matte plus the JSON `attempts`.
+3. Change the matte color or source prompt, then call `transparent extract --method auto`; prefer `--matte-color auto` for AI-generated flat backgrounds when the fallback chroma path is likely to help.
 4. For translucency or glow, create black and white variants and use dual extraction.
 5. Run `transparent verify --profile <profile> --strict` on the final PNG. If the PNG came from chroma extraction, include `--expected-matte-color <matte>`.
 6. Deliver only the verified PNG unless the user asked for diagnostics.
@@ -71,7 +71,7 @@ Render on a perfectly flat pure magenta background. No shadows, gradients, textu
 
 ### Opaque entities
 
-Use a single chroma matte.
+Use a single chroma matte. The runtime will still try `background-remove` first, then reuse the matte through chroma fallback if that path verifies better.
 
 ```bash
 node scripts/gpt_image_2_skill.cjs --json --json-events \
@@ -84,12 +84,19 @@ If the object contains green, avoid green:
 
 ```bash
 node scripts/gpt_image_2_skill.cjs --json \
-  transparent extract --method chroma \
+  transparent extract --method auto \
   --input /tmp/source-magenta.png --matte-color auto \
   --out /tmp/asset.png --strict
 ```
 
-`--matte-color auto` samples the actual source background from image edges and reports the sampled color as `extraction.matte_color` with `matte_color_source: "auto-sampled"`. Use explicit `--matte-color magenta` or `--matte-color '#ff00ff'` only when the source background is known to be exact.
+`transparent extract --method` semantics:
+
+- `auto`: prefer merged `background-remove`, then fallback to built-in chroma
+- `rembg`: force merged `background-remove`
+- `chroma`: force built-in chroma only
+- `dual`: force black/white dual extraction
+
+`--matte-color auto` samples the actual source background from image edges and reports the sampled color as `extraction.matte_color` with `matte_color_source: "auto-sampled"` when the chroma path is selected. Use explicit `--matte-color magenta` or `--matte-color '#ff00ff'` only when the source background is known to be exact.
 
 For broad material behavior, add `--material standard`, `soft-3d`, `flat-icon`, `sticker`, or `glow`. These presets tune chroma `threshold`, `softness`, and `spill_suppression`; manual flags override the preset.
 
@@ -177,7 +184,7 @@ Do not rely on the image model for exact UI text, labels, scores, combo numbers,
 
 ## Verification
 
-Always verify:
+Always verify, and inspect the extraction path that actually won:
 
 ```bash
 node scripts/gpt_image_2_skill.cjs --json \
@@ -207,6 +214,7 @@ Important fields:
 | `quality_score` | Summary score for ranking candidates. |
 | `failure_reasons` | Machine-readable reasons to drive retries. |
 | `warnings` | Edge contact or missing semi-transparency warnings. |
+| `selected_strategy` / `attempts` | Which extraction path won and which fallbacks were tried. |
 
 When verifying chroma output, pass the matte if known:
 

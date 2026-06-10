@@ -30,6 +30,7 @@ Common `code` values:
 | `network_error` | runtime | transport-level failure |
 | `http_error` | runtime | upstream returned non-2xx |
 | `invalid_body_json` | runtime | `request create` body file or stdin not valid JSON |
+| `background_remove_failed` | runtime | standalone background removal failed or a batch had one or more failed items |
 | `transparent_verification_failed` | runtime | transparent PNG extraction completed but final alpha verification did not pass |
 | `transparent_input_mismatch` | runtime | dual-background extraction sources have different dimensions |
 
@@ -67,6 +68,81 @@ Common `code` values:
       "auth_mode": "chatgpt_token"
     }
   }
+}
+```
+
+### `background doctor`
+
+```json
+{
+  "ok": true,
+  "command": "background doctor",
+  "ready": true,
+  "environment": {
+    "ready": true,
+    "script": {
+      "path": "/path/to/background_remove.py",
+      "exists": true
+    },
+    "python": {
+      "resolved": "python3",
+      "version": "Python 3.11.9"
+    },
+    "dependencies": {
+      "rembg": { "installed": true, "version": "2.0.67", "error": null },
+      "pillow": { "installed": true, "version": "10.4.0", "error": null },
+      "numpy": { "installed": true, "version": "2.1.1", "error": null }
+    },
+    "methods": {
+      "rembg": { "available": true },
+      "builtin": { "available": true }
+    },
+    "install_hints": []
+  }
+}
+```
+
+### `background init`
+
+```json
+{
+  "ok": true,
+  "command": "background init",
+  "initialized": false,
+  "environment": { "...": "same shape as background doctor" },
+  "next_steps": [
+    "Install Pillow: pip install Pillow",
+    "Install rembg for AI removal: pip install rembg[gpu] or pip install rembg"
+  ]
+}
+```
+
+### `background remove`
+
+```json
+{
+  "ok": true,
+  "command": "background remove",
+  "requested_method": "rembg",
+  "environment": {
+    "python": { "resolved": "python3", "version": "Python 3.11.9" },
+    "script_path": "/path/to/background_remove.py"
+  },
+  "summary": {
+    "total": 2,
+    "success": 2,
+    "failed": 0
+  },
+  "results": [
+    {
+      "input": "/tmp/a.png",
+      "success": true,
+      "file": "/tmp/out/a_nobg.png",
+      "method": "rembg",
+      "fallbackFrom": null,
+      "error": null
+    }
+  ]
 }
 ```
 
@@ -170,8 +246,19 @@ Runs local extraction only. Use `--strict` when the command should fail if verif
   "ok": true,
   "command": "transparent extract",
   "method": "dual",
+  "selected_strategy": "dual",
   "profile": "glow",
   "material": null,
+  "attempts": [
+    {
+      "strategy": "dual",
+      "selected": true,
+      "success": true,
+      "passed": true,
+      "quality_score": 0.99,
+      "error": null
+    }
+  ],
   "extraction": {
     "method": "dual",
     "rgb_scrubbed": true,
@@ -187,6 +274,15 @@ Runs local extraction only. Use `--strict` when the command should fail if verif
   "output": { "path": "/tmp/asset.png", "files": [] }
 }
 ```
+
+`selected_strategy` tells you which path produced the final file: `background-remove`, `chroma`, or `dual`. `attempts` summarizes every tried path in order so agents can tell when the runtime fell back.
+
+Method semantics:
+
+- `auto` — prefer `background-remove`, then fallback to chroma
+- `rembg` — force `background-remove`
+- `chroma` — force local chroma extraction
+- `dual` — force dual-background extraction
 
 Chroma extraction reports `matte_color`, `matte_color_source`, `threshold`, `softness`, `spill_suppression`, and `material`. `matte_color_source` is `"auto-sampled"` when `--matte-color auto` was used or no matte was provided, and `"provided"` when a color was explicit. `spill_suppression` is a `0..1` matte-edge cleanup strength and defaults to `0.85`.
 

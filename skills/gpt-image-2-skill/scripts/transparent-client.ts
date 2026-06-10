@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CliError } from "./errors.ts";
+import { CliError, asError } from "./errors.ts";
+import { runBackgroundRemove } from "./background-remove-client.ts";
 import { requestGenerate } from "./openai-client.ts";
 import { runCodexImageCommand } from "./codex-client.ts";
+import { ensureParentDir } from "./fs-helpers.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { ProviderConfig } from "./types.ts";
 import type { ImageSizeResolution } from "./image-size.ts";
@@ -14,7 +16,9 @@ import {
   normalizePngOutputPath,
   parseMatteColorOrAuto,
   resolveChromaSettings,
+  type ExtractionReport,
   type TransparentProfile,
+  type TransparentVerification,
   verifyTransparentFile,
 } from "./transparent-core.ts";
 
@@ -26,7 +30,7 @@ type VerifyArgs = {
 };
 
 type ExtractArgs = {
-  method: "chroma" | "dual";
+  method: "auto" | "rembg" | "chroma" | "dual";
   input?: string;
   darkImage?: string;
   lightImage?: string;
@@ -38,6 +42,45 @@ type ExtractArgs = {
   softness?: number;
   spillSuppression?: number;
   strict: boolean;
+};
+
+type BackgroundRemoveExtractionReport = {
+  method: "background-remove";
+  inputs: { input: string };
+  output: ReturnType<typeof outputFileValue>;
+  matte_color: null;
+  matte_color_source: null;
+  threshold: null;
+  softness: null;
+  spill_suppression: null;
+  material: null;
+  matte_decontamination_applied: false;
+  rgb_scrubbed: boolean;
+  dual_alignment: null;
+  background_remove: {
+    requested_method: string;
+    resolved_method: string | null;
+    fallback_from: string | null;
+    python: string | null;
+    script_path: string;
+    exit_code: number | null;
+  };
+};
+
+type SelectedExtractionReport = ExtractionReport | BackgroundRemoveExtractionReport;
+
+type ExtractionAttempt = {
+  strategy: "background-remove" | "chroma" | "dual";
+  selected: boolean;
+  success: boolean;
+  output?: ReturnType<typeof outputFileValue>;
+  verification?: TransparentVerification;
+  extraction?: SelectedExtractionReport;
+  error?: {
+    code: string;
+    message: string;
+    detail?: unknown;
+  };
 };
 
 export async function runTransparentVerify(args: VerifyArgs) {
@@ -61,37 +104,39 @@ export async function runTransparentVerify(args: VerifyArgs) {
 
 export async function runTransparentExtract(args: ExtractArgs) {
   const method = resolveExtractMethod(args);
-  const outPath = normalizePngOutputPath(args.out);
   const profile = args.profile as TransparentProfile;
-  const extraction =
-    method === "chroma"
-      ? extractChromaFile(
-          args.input!,
-          outPath,
-          args.matteColor ? (parseMatteColorOrAuto(args.matteColor) ? args.matteColor : null) : null,
-          resolveChromaSettings(args.material, args.threshold, args.softness, args.spillSuppression),
+  const extractionResult =
+    method === "dual"
+      ? runDualExtractionAttempt({
+          darkImage: args.darkImage!,
+          lightImage: args.lightImage!,
+          outPath: normalizePngOutputPath(args.out),
           profile,
-        )
-      : extractDualFile(args.darkImage!, args.lightImage!, outPath, profile);
-  const verification = verifyTransparentFile(outPath, {
-    profile: args.profile as any,
-    expectedMatteColor: extraction.matte_color,
-  });
-  if (args.strict && !verification.passed) {
-    throw new CliError("transparent_verification_failed", "Transparent verification failed.", {
-      output: outPath,
-      verification,
-    });
-  }
+          strict: args.strict,
+        })
+      : runPreferredSingleImageExtraction({
+          inputPath: args.input!,
+          outPath: normalizePngOutputPath(args.out),
+          profile,
+          method,
+          material: args.material,
+          matteColor: args.matteColor,
+          threshold: args.threshold,
+          softness: args.softness,
+          spillSuppression: args.spillSuppression,
+          strict: args.strict,
+        });
   return {
     ok: true,
     command: "transparent extract",
     method,
     profile: args.profile,
+    selected_strategy: extractionResult.selectedStrategy,
     material: args.material ?? null,
-    extraction,
-    verification,
-    output: outputFileValue(outPath),
+    attempts: summarizeAttempts(extractionResult.attempts),
+    extraction: extractionResult.extraction,
+    verification: extractionResult.verification,
+    output: outputFileValue(normalizePngOutputPath(args.out)),
   };
 }
 
@@ -121,7 +166,7 @@ export async function runTransparentGenerate(input: {
   stream?: boolean;
   events: JsonEventWriter;
 }) {
-  if ((input.method ?? "chroma") === "dual") {
+  if ((input.method ?? "auto") === "dual") {
     throw new CliError(
       "unsupported_option",
       "transparent generate does not generate aligned dual-background sources. Generate the source pair explicitly, then call transparent extract --method dual.",
@@ -197,56 +242,58 @@ export async function runTransparentGenerate(input: {
     };
   }
   const outPath = normalizePngOutputPath(input.out);
-  const extraction = extractChromaFile(
-    sourcePath,
-    outPath,
-    null,
-    resolveChromaSettings(input.material, input.threshold, input.softness, input.spillSuppression),
-    (input.profile || "generic") as TransparentProfile,
-  );
-  const verification = verifyTransparentFile(outPath, {
-    profile: (input.profile || "generic") as any,
-    expectedMatteColor: extraction.matte_color,
-  });
-  if (!verification.passed) {
-    throw new CliError("transparent_verification_failed", "Transparent verification failed.", {
-      source: sourcePath,
-      output: outPath,
-      verification,
+  try {
+    const selectedMethod = normalizeSingleImageMethod(input.method);
+    const extractionResult = runPreferredSingleImageExtraction({
+      inputPath: sourcePath,
+      outPath,
+      profile: (input.profile || "generic") as TransparentProfile,
+      method: selectedMethod,
+      material: input.material,
+      threshold: input.threshold,
+      softness: input.softness,
+      spillSuppression: input.spillSuppression,
+      strict: true,
     });
+    return {
+      ok: true,
+      command: "transparent generate",
+      provider: input.providerName,
+      provider_selection: { resolved: input.providerName },
+      request: {
+        prompt: input.prompt,
+        source_prompt: sourcePrompt,
+        method: selectedMethod,
+        preferred_method:
+          selectedMethod === "auto" ? "background-remove" : selectedMethod === "rembg" ? "background-remove" : selectedMethod,
+        fallback_method: selectedMethod === "auto" ? "chroma" : null,
+        profile: input.profile || "generic",
+        requested_matte_color: requestedMatteColor,
+        matte_color: extractionResult.extraction.matte_color,
+        matte_color_source: extractionResult.extraction.matte_color_source,
+        threshold: extractionResult.extraction.threshold,
+        softness: extractionResult.extraction.softness,
+        spill_suppression: extractionResult.extraction.spill_suppression,
+        material: input.material ?? null,
+        size: input.size ?? null,
+        quality: input.quality ?? null,
+        format: "png",
+      },
+      ...(input.sizeResolution?.changed ? { size_normalization: input.sizeResolution } : {}),
+      source: {
+        path: sourcePath,
+        kept: Boolean(input.keepSources || input.sourceOut || input.reportDir),
+        generation: sourceGeneration,
+      },
+      selected_strategy: extractionResult.selectedStrategy,
+      attempts: summarizeAttempts(extractionResult.attempts),
+      extraction: extractionResult.extraction,
+      verification: extractionResult.verification,
+      output: outputFileValue(outPath),
+    };
+  } finally {
+    cleanupTempSource(input, sourcePath);
   }
-  cleanupTempSource(input, sourcePath);
-  return {
-    ok: true,
-    command: "transparent generate",
-    provider: input.providerName,
-    provider_selection: { resolved: input.providerName },
-    request: {
-      prompt: input.prompt,
-      source_prompt: sourcePrompt,
-      method: "chroma",
-      profile: input.profile || "generic",
-      requested_matte_color: requestedMatteColor,
-      matte_color: extraction.matte_color,
-      matte_color_source: extraction.matte_color_source,
-      threshold: extraction.threshold,
-      softness: extraction.softness,
-      spill_suppression: extraction.spill_suppression,
-      material: input.material ?? null,
-      size: input.size ?? null,
-      quality: input.quality ?? null,
-      format: "png",
-    },
-    ...(input.sizeResolution?.changed ? { size_normalization: input.sizeResolution } : {}),
-    source: {
-      path: sourcePath,
-      kept: Boolean(input.keepSources || input.sourceOut || input.reportDir),
-      generation: sourceGeneration,
-    },
-    extraction,
-    verification,
-    output: outputFileValue(outPath),
-  };
 }
 
 function resolveExtractMethod(args: ExtractArgs) {
@@ -257,9 +304,296 @@ function resolveExtractMethod(args: ExtractArgs) {
     return "dual";
   }
   if (!args.input) {
-    throw new CliError("invalid_argument", "transparent extract --method chroma requires --input.");
+    throw new CliError("invalid_argument", "transparent extract single-image modes require --input.");
   }
-  return "chroma";
+  return normalizeSingleImageMethod(args.method);
+}
+
+function normalizeSingleImageMethod(method?: string) {
+  if (method === "rembg" || method === "chroma") return method;
+  return "auto" as const;
+}
+
+function runPreferredSingleImageExtraction(input: {
+  inputPath: string;
+  outPath: string;
+  profile: TransparentProfile;
+  method: "auto" | "rembg" | "chroma";
+  material?: string;
+  matteColor?: string;
+  threshold?: number;
+  softness?: number;
+  spillSuppression?: number;
+  strict: boolean;
+}) {
+  const attempts: ExtractionAttempt[] = [];
+  const attemptDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-extract-"));
+  const backgroundRemoveOut = path.join(attemptDir, "background-remove.png");
+  const chromaOut = path.join(attemptDir, "chroma.png");
+  try {
+    if (input.method === "rembg" || input.method === "auto") {
+      const backgroundRemoveAttempt = createBackgroundRemoveAttempt(
+        input.inputPath,
+        backgroundRemoveOut,
+        input.profile,
+      );
+      attempts.push(backgroundRemoveAttempt);
+      if (input.method === "rembg") {
+        backgroundRemoveAttempt.selected = true;
+        return finalizeSelectedAttempt(backgroundRemoveAttempt, input.outPath, input.profile, input.strict, attempts);
+      }
+      if (backgroundRemoveAttempt.success && backgroundRemoveAttempt.verification?.passed) {
+        backgroundRemoveAttempt.selected = true;
+        return finalizeSelectedAttempt(backgroundRemoveAttempt, input.outPath, input.profile, input.strict, attempts);
+      }
+    }
+    if (input.method === "chroma" || input.method === "auto") {
+      const chromaAttempt = createChromaFallbackAttempt({
+        inputPath: input.inputPath,
+        outPath: chromaOut,
+        profile: input.profile,
+        material: input.material,
+        matteColor: input.matteColor,
+        threshold: input.threshold,
+        softness: input.softness,
+        spillSuppression: input.spillSuppression,
+      });
+      attempts.push(chromaAttempt);
+    }
+    const selectedAttempt = selectBestAttempt(attempts);
+    if (!selectedAttempt) {
+      throw new CliError("transparent_extraction_failed", "All transparent extraction attempts failed.", {
+        attempts: summarizeAttempts(attempts),
+      });
+    }
+    selectedAttempt.selected = true;
+    return finalizeSelectedAttempt(selectedAttempt, input.outPath, input.profile, input.strict, attempts);
+  } finally {
+    fs.rmSync(attemptDir, { recursive: true, force: true });
+  }
+}
+
+function runDualExtractionAttempt(input: {
+  darkImage: string;
+  lightImage: string;
+  outPath: string;
+  profile: TransparentProfile;
+  strict: boolean;
+}) {
+  const attempts: ExtractionAttempt[] = [];
+  try {
+    const extraction = extractDualFile(input.darkImage, input.lightImage, input.outPath, input.profile);
+    const verification = verifyTransparentFile(input.outPath, {
+      profile: input.profile,
+      expectedMatteColor: extraction.matte_color,
+    });
+    const attempt: ExtractionAttempt = {
+      strategy: "dual",
+      selected: true,
+      success: true,
+      output: outputFileValue(input.outPath),
+      verification,
+      extraction,
+    };
+    attempts.push(attempt);
+    if (input.strict && !verification.passed) {
+      throw new CliError("transparent_verification_failed", "Transparent verification failed.", {
+        output: input.outPath,
+        verification,
+        attempts: summarizeAttempts(attempts),
+      });
+    }
+    return {
+      selectedStrategy: "dual" as const,
+      attempts,
+      extraction,
+      verification,
+    };
+  } catch (error) {
+    const normalized = asError(error);
+    throw new CliError(normalized.code, normalized.message, {
+      ...(typeof normalized.detail === "object" && normalized.detail !== null ? normalized.detail : {}),
+      attempts: summarizeAttempts(attempts),
+    });
+  }
+}
+
+function createBackgroundRemoveAttempt(
+  inputPath: string,
+  outPath: string,
+  profile: TransparentProfile,
+): ExtractionAttempt {
+  const result = runBackgroundRemove(inputPath, outPath, "rembg");
+  const primary = result.results[0];
+  if (!result.success || !primary?.file) {
+    return {
+      strategy: "background-remove",
+      selected: false,
+      success: false,
+      error: {
+        code: "background_remove_failed",
+        message: primary?.error || result.error || "background_remove.py failed.",
+        detail: {
+          python: result.python,
+          python_version: result.pythonVersion,
+          script_path: result.scriptPath,
+          exit_code: result.exitCode,
+        },
+      },
+    };
+  }
+  const verification = verifyTransparentFile(primary.file, {
+    profile,
+  });
+  const extraction = buildBackgroundRemoveExtractionReport(inputPath, primary.file, result, verification);
+  return {
+    strategy: "background-remove",
+    selected: false,
+    success: true,
+    output: outputFileValue(primary.file),
+    verification,
+    extraction,
+  };
+}
+
+function createChromaFallbackAttempt(input: {
+  inputPath: string;
+  outPath: string;
+  profile: TransparentProfile;
+  material?: string;
+  matteColor?: string;
+  threshold?: number;
+  softness?: number;
+  spillSuppression?: number;
+}) {
+  try {
+    const extraction = extractChromaFile(
+      input.inputPath,
+      input.outPath,
+      input.matteColor ? (parseMatteColorOrAuto(input.matteColor) ? input.matteColor : null) : null,
+      resolveChromaSettings(input.material, input.threshold, input.softness, input.spillSuppression),
+      input.profile,
+    );
+    const verification = verifyTransparentFile(input.outPath, {
+      profile: input.profile,
+      expectedMatteColor: extraction.matte_color,
+    });
+    return {
+      strategy: "chroma" as const,
+      selected: false,
+      success: true,
+      output: outputFileValue(input.outPath),
+      verification,
+      extraction,
+    };
+  } catch (error) {
+    const normalized = asError(error);
+    return {
+      strategy: "chroma" as const,
+      selected: false,
+      success: false,
+      error: {
+        code: normalized.code,
+        message: normalized.message,
+        detail: normalized.detail,
+      },
+    };
+  }
+}
+
+function finalizeSelectedAttempt(
+  selectedAttempt: ExtractionAttempt,
+  outPath: string,
+  profile: TransparentProfile,
+  strict: boolean,
+  attempts: ExtractionAttempt[],
+) {
+  const extraction = selectedAttempt.extraction;
+  if (!selectedAttempt.success || !selectedAttempt.output || !selectedAttempt.verification || !extraction) {
+    throw new CliError("transparent_extraction_failed", "All transparent extraction attempts failed.", {
+      attempts: summarizeAttempts(attempts),
+    });
+  }
+  if (selectedAttempt.output.path !== outPath) {
+    ensureParentDir(outPath);
+    fs.copyFileSync(selectedAttempt.output.path, outPath);
+  }
+  const normalizedExtraction = withOutputPath(extraction, outPath);
+  const finalVerification = verifyTransparentFile(outPath, {
+    profile,
+    expectedMatteColor: normalizedExtraction.matte_color,
+  });
+  if (strict && !finalVerification.passed) {
+    throw new CliError("transparent_verification_failed", "Transparent verification failed.", {
+      output: outPath,
+      verification: finalVerification,
+      attempts: summarizeAttempts(attempts),
+    });
+  }
+  return {
+    selectedStrategy: selectedAttempt.strategy,
+    attempts,
+    extraction: normalizedExtraction,
+    verification: finalVerification,
+  };
+}
+
+function selectBestAttempt(attempts: ExtractionAttempt[]) {
+  const successful = attempts.filter((attempt) => attempt.success && attempt.verification && attempt.extraction);
+  if (successful.length === 0) return null;
+  const passed = successful.filter((attempt) => attempt.verification?.passed);
+  if (passed.length > 0) return passed[0]!;
+  return successful.reduce((best, current) =>
+    (current.verification?.quality_score ?? 0) > (best.verification?.quality_score ?? 0) ? current : best,
+  );
+}
+
+function buildBackgroundRemoveExtractionReport(
+  inputPath: string,
+  outputPath: string,
+  result: ReturnType<typeof runBackgroundRemove>,
+  verification: TransparentVerification,
+): BackgroundRemoveExtractionReport {
+  return {
+    method: "background-remove",
+    inputs: { input: inputPath },
+    output: outputFileValue(outputPath),
+    matte_color: null,
+    matte_color_source: null,
+    threshold: null,
+    softness: null,
+    spill_suppression: null,
+    material: null,
+    matte_decontamination_applied: false,
+    rgb_scrubbed: verification.transparent_rgb_scrubbed,
+    dual_alignment: null,
+    background_remove: {
+      requested_method: "rembg",
+      resolved_method: result.results[0]?.method ?? null,
+      fallback_from: result.results[0]?.fallbackFrom ?? null,
+      python: result.python,
+      script_path: result.scriptPath,
+      exit_code: result.exitCode,
+    },
+  };
+}
+
+function withOutputPath<T extends SelectedExtractionReport>(extraction: T, outPath: string): T {
+  return {
+    ...extraction,
+    output: outputFileValue(outPath),
+  };
+}
+
+function summarizeAttempts(attempts: ExtractionAttempt[]) {
+  return attempts.map((attempt) => ({
+    strategy: attempt.strategy,
+    selected: attempt.selected,
+    success: attempt.success,
+    passed: attempt.verification?.passed ?? null,
+    quality_score: attempt.verification?.quality_score ?? null,
+    error: attempt.error ?? null,
+  }));
 }
 
 function outputFileValue(filePath: string) {

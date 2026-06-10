@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  inspectBackgroundRemoveEnvironment,
+  runBackgroundRemoveCommand,
+} from "./background-remove-client.ts";
 import { CliError, asError } from "./errors.ts";
 import { JsonEventWriter } from "./json-events.ts";
 import type { JsonError } from "./types.ts";
@@ -80,6 +84,7 @@ async function dispatch(argv: string[], events: JsonEventWriter, globalProvider?
   if (group === "config") return handleConfig(command, rest);
   if (group === "auth") return handleAuth(command);
   if (group === "doctor") return handleDoctor(rest, globalProvider);
+  if (group === "background" || group === "background-remove") return handleBackground(command, rest);
   if (group === "images") return handleImages(command, rest, events, globalProvider);
   if (group === "request") return handleRequest(command, rest, events, globalProvider);
   if (group === "transparent") return handleTransparent(command, rest, events, globalProvider);
@@ -260,6 +265,7 @@ function handleDoctor(rest: string[], globalProvider?: string) {
   }
   const config = readConfig();
   const auth = handleAuth("inspect") as ReturnType<typeof handleAuth>;
+  const background = inspectBackgroundRemoveEnvironment();
   return {
     ok: true,
     command: "doctor",
@@ -269,7 +275,93 @@ function handleDoctor(rest: string[], globalProvider?: string) {
       base_delay_seconds: 1,
     },
     config_file: configPath(),
+    background_remove: {
+      ready: background.ready,
+      script_path: background.scriptPath,
+      script_exists: background.scriptExists,
+      python: background.python,
+      methods: background.methods,
+      install_hints: background.installHints,
+    },
   };
+}
+
+function handleBackground(command?: string, rest: string[] = []) {
+  if (command === "doctor") {
+    if (rest.length) {
+      throw new CliError("invalid_command", `Unexpected background doctor args: ${rest.join(" ")}`);
+    }
+    const environment = inspectBackgroundRemoveEnvironment();
+    return {
+      ok: true,
+      command: "background doctor",
+      ready: environment.ready,
+      environment: normalizeBackgroundEnvironment(environment),
+    };
+  }
+  if (command === "init") {
+    if (rest.length) {
+      throw new CliError("invalid_command", `Unexpected background init args: ${rest.join(" ")}`);
+    }
+    const environment = inspectBackgroundRemoveEnvironment();
+    return {
+      ok: true,
+      command: "background init",
+      initialized: environment.ready,
+      environment: normalizeBackgroundEnvironment(environment),
+      next_steps:
+        environment.installHints.length > 0
+          ? environment.installHints
+          : [
+              "Background removal runtime is ready.",
+              "Use `background remove --input ...` for direct cutouts or `transparent generate` for integrated PNG workflows.",
+            ],
+    };
+  }
+  if (command === "remove") {
+    const args = parseBackgroundRemoveArgs(rest);
+    const result = runBackgroundRemoveCommand({
+      inputs: args.inputs,
+      output: args.output,
+      method: args.method,
+    });
+    if (!result.success) {
+      throw new CliError("background_remove_failed", result.error || "Background removal failed.", {
+        requested_method: args.method,
+        results: result.results,
+        environment: {
+          python: {
+            resolved: result.python,
+            version: result.pythonVersion,
+          },
+          script_path: result.scriptPath,
+        },
+      });
+    }
+    return {
+      ok: true,
+      command: "background remove",
+      requested_method: args.method,
+      environment: {
+        python: {
+          resolved: result.python,
+          version: result.pythonVersion,
+        },
+        script_path: result.scriptPath,
+      },
+      summary: {
+        total: result.results.length,
+        success: result.results.filter((entry) => entry.success).length,
+        failed: result.results.filter((entry) => !entry.success).length,
+      },
+      results: result.results,
+      ...(result.results.length === 1 && result.results[0]?.file
+        ? { output: summarizeLocalOutput(result.results[0].file) }
+        : {}),
+      ...(result.error ? { error_message: result.error } : {}),
+    };
+  }
+  throw new CliError("invalid_command", `Unknown background command: ${command ?? ""}`.trim());
 }
 
 async function handleImages(
@@ -707,7 +799,7 @@ function parseTransparentVerifyArgs(rest: string[]) {
 
 function parseTransparentExtractArgs(rest: string[]) {
   const state = {
-    method: "auto" as "auto" | "dual",
+    method: "auto" as "auto" | "rembg" | "chroma" | "dual",
     input: undefined as string | undefined,
     darkImage: undefined as string | undefined,
     lightImage: undefined as string | undefined,
@@ -725,7 +817,11 @@ function parseTransparentExtractArgs(rest: string[]) {
     const value = rest[i + 1];
     switch (arg) {
       case "--method":
-        state.method = value === "dual" ? "dual" : "auto";
+        if (value === "auto" || value === "rembg" || value === "chroma" || value === "dual") {
+          state.method = value;
+        } else {
+          throw new CliError("invalid_argument", "transparent extract --method must be auto, rembg, chroma, or dual.");
+        }
         i += 1;
         break;
       case "--input":
@@ -776,10 +872,7 @@ function parseTransparentExtractArgs(rest: string[]) {
     }
   }
   if (!state.out) throw new CliError("invalid_command", "Missing required --out.");
-  return {
-    ...state,
-    method: state.method === "dual" ? "dual" : "chroma",
-  };
+  return state;
 }
 
 function parseTransparentGenerateArgs(rest: string[]) {
@@ -795,7 +888,7 @@ function parseTransparentGenerateArgs(rest: string[]) {
     compression: undefined as number | undefined,
     moderation: undefined as string | undefined,
     stream: undefined as boolean | undefined,
-    method: "auto" as "auto" | "dual",
+    method: "auto" as "auto" | "rembg" | "chroma" | "dual",
     profile: "generic",
     material: undefined as string | undefined,
     matteColor: "#00ff00",
@@ -852,7 +945,11 @@ function parseTransparentGenerateArgs(rest: string[]) {
         state.stream = true;
         break;
       case "--method":
-        state.method = value === "dual" ? "dual" : "auto";
+        if (value === "auto" || value === "rembg" || value === "chroma" || value === "dual") {
+          state.method = value;
+        } else {
+          throw new CliError("invalid_argument", "transparent generate --method must be auto, rembg, chroma, or dual.");
+        }
         i += 1;
         break;
       case "--profile":
@@ -900,6 +997,46 @@ function parseTransparentGenerateArgs(rest: string[]) {
   }
   if (!state.prompt) throw new CliError("invalid_command", "Missing required --prompt.");
   if (!state.out) throw new CliError("invalid_command", "Missing required --out.");
+  return state;
+}
+
+function parseBackgroundRemoveArgs(rest: string[]) {
+  const state = {
+    inputs: [] as string[],
+    output: undefined as string | undefined,
+    method: "rembg",
+  };
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    const value = rest[i + 1];
+    switch (arg) {
+      case "--input":
+      case "-i":
+        while (rest[i + 1] && !rest[i + 1]!.startsWith("-")) {
+          state.inputs.push(rest[i + 1]!);
+          i += 1;
+        }
+        break;
+      case "--output":
+      case "-o":
+        state.output = value;
+        i += 1;
+        break;
+      case "--method":
+      case "-m":
+        state.method = value;
+        i += 1;
+        break;
+      default:
+        throw new CliError("invalid_command", `Unknown argument: ${arg}`);
+    }
+  }
+  if (state.inputs.length === 0) {
+    throw new CliError("invalid_command", "background remove requires at least one --input.");
+  }
+  if (state.method !== "rembg" && state.method !== "builtin") {
+    throw new CliError("invalid_argument", "background remove --method must be rembg or builtin.");
+  }
   return state;
 }
 
@@ -1089,4 +1226,27 @@ function readBodyJson(filePath: string) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function normalizeBackgroundEnvironment(environment: ReturnType<typeof inspectBackgroundRemoveEnvironment>) {
+  return {
+    ready: environment.ready,
+    script: {
+      path: environment.scriptPath,
+      exists: environment.scriptExists,
+    },
+    python: environment.python,
+    dependencies: environment.dependencies,
+    methods: environment.methods,
+    install_hints: environment.installHints,
+  };
+}
+
+function summarizeLocalOutput(filePath: string) {
+  const stats = fs.statSync(filePath);
+  return {
+    path: filePath,
+    bytes: stats.size,
+    files: [{ index: 0, path: filePath, bytes: stats.size }],
+  };
 }

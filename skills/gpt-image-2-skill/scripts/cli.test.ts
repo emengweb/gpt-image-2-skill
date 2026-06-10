@@ -82,6 +82,59 @@ function readPng(filePath: string) {
   return PNG.sync.read(fs.readFileSync(filePath));
 }
 
+function writeBackgroundRemoveSuccessStub(filePath: string, outputPngBase64: string) {
+  fs.writeFileSync(
+    filePath,
+    `#!/usr/bin/env python3
+import argparse
+import base64
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input", "-i", nargs="+", required=True)
+parser.add_argument("--output", "-o")
+parser.add_argument("--method", "-m")
+parser.add_argument("--json-only", action="store_true")
+args = parser.parse_args()
+results = []
+for source_path in args.input:
+    source = Path(source_path)
+    if args.output is None:
+        output = source.parent / f"{source.stem}_nobg.png"
+    elif len(args.input) > 1:
+        output = Path(args.output) / f"{source.stem}_nobg.png"
+    else:
+        output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(base64.b64decode(${JSON.stringify(outputPngBase64)}))
+    results.append({
+        "input": str(source),
+        "success": True,
+        "file": str(output),
+        "method": args.method or "rembg"
+    })
+if len(results) == 1:
+    print(json.dumps(results[0]))
+else:
+    print(json.dumps({"results": results}))
+`,
+    { mode: 0o755 },
+  );
+}
+
+function writeBackgroundRemoveFailureStub(filePath: string, message: string) {
+  fs.writeFileSync(
+    filePath,
+    `#!/usr/bin/env python3
+import json
+print(json.dumps({"error": ${JSON.stringify(message)}}))
+raise SystemExit(1)
+`,
+    { mode: 0o755 },
+  );
+}
+
 test("generate body defaults to response_format=b64_json and stream=false", () => {
   const body = buildGenerateBody(provider(), {
     prompt: "hello",
@@ -1463,8 +1516,168 @@ test("transparent extract chroma outputs verified png", () => {
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.command, "transparent extract");
+    assert.equal(payload.method, "chroma");
+    assert.equal(payload.selected_strategy, "chroma");
     assert.equal(payload.verification.passed, true);
     assert.ok(fs.statSync(outPath).size > 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract auto falls back to local chroma when background-remove fails", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-source.png");
+  const outPath = path.join(tempDir, "magenta-output.png");
+  const backgroundRemoveStubPath = path.join(tempDir, "background-remove-failure.py");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [120, 230, 90];
+  writeRgbaPng(inputPath, 7, 7, (x, y) => {
+    if (x >= 2 && x <= 4 && y >= 2 && y <= 4) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "simulated background-remove failure");
+  const previousScript = process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+  process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = backgroundRemoveStubPath;
+  try {
+    const payload = await runTransparentExtract({
+      method: "auto",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      strict: true,
+    });
+    assert.equal(payload.selected_strategy, "chroma");
+    assert.equal(payload.attempts[0].strategy, "background-remove");
+    assert.equal(payload.attempts[0].success, false);
+    assert.equal(payload.attempts[1].strategy, "chroma");
+    assert.equal(payload.attempts[1].selected, true);
+    assert.equal(payload.verification.passed, true);
+  } finally {
+    if (previousScript === undefined) delete process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+    else process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = previousScript;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("transparent extract chroma mode bypasses background-remove attempts", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-source.png");
+  const outPath = path.join(tempDir, "magenta-output.png");
+  const backgroundRemoveStubPath = path.join(tempDir, "background-remove-failure.py");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [120, 230, 90];
+  writeRgbaPng(inputPath, 7, 7, (x, y) => {
+    if (x >= 2 && x <= 4 && y >= 2 && y <= 4) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "simulated background-remove failure");
+  const previousScript = process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+  process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = backgroundRemoveStubPath;
+  try {
+    const payload = await runTransparentExtract({
+      method: "chroma",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      strict: true,
+    });
+    assert.equal(payload.selected_strategy, "chroma");
+    assert.equal(payload.attempts.length, 1);
+    assert.equal(payload.attempts[0].strategy, "chroma");
+    assert.equal(payload.verification.passed, true);
+  } finally {
+    if (previousScript === undefined) delete process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+    else process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = previousScript;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("background doctor reports environment shape", () => {
+  const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+  const result = childProcess.spawnSync(
+    process.execPath,
+    [cliPath, "--json", "background", "doctor"],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.command, "background doctor");
+  assert.equal(typeof payload.ready, "boolean");
+  assert.equal(typeof payload.environment.script.path, "string");
+  assert.equal(typeof payload.environment.script.exists, "boolean");
+  assert.equal(Array.isArray(payload.environment.install_hints), true);
+});
+
+test("background init returns next steps", () => {
+  const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+  const result = childProcess.spawnSync(
+    process.execPath,
+    [cliPath, "--json", "background", "init"],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.command, "background init");
+  assert.equal(typeof payload.initialized, "boolean");
+  assert.equal(Array.isArray(payload.next_steps), true);
+  assert.ok(payload.next_steps.length >= 1);
+});
+
+test("background remove supports multiple inputs through the merged CLI", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+  const stubPath = path.join(tempDir, "background-remove-success.py");
+  const inputA = path.join(tempDir, "a.png");
+  const inputB = path.join(tempDir, "b.png");
+  const outputDir = path.join(tempDir, "out");
+  writeBackgroundRemoveSuccessStub(
+    stubPath,
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==",
+  );
+  fs.writeFileSync(inputA, Buffer.from("fake"));
+  fs.writeFileSync(inputB, Buffer.from("fake"));
+  try {
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [
+        cliPath,
+        "--json",
+        "background",
+        "remove",
+        "--input",
+        inputA,
+        inputB,
+        "--output",
+        outputDir,
+        "--method",
+        "builtin",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GPT_IMAGE_2_BG_REMOVE_SCRIPT: stubPath,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.command, "background remove");
+    assert.equal(payload.requested_method, "builtin");
+    assert.equal(payload.summary.total, 2);
+    assert.equal(payload.summary.success, 2);
+    assert.equal(payload.results.length, 2);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1476,6 +1689,7 @@ test("transparent generate produces a verified png through the local pipeline", 
   const configDir = path.join(codexHome, "gpt-image-2-skill");
   const outPath = path.join(tempDir, "transparent.png");
   const fetchStubPath = path.join(tempDir, "fetch-stub.cjs");
+  const backgroundRemoveStubPath = path.join(tempDir, "background-remove-success.py");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(
     path.join(configDir, "config.json"),
@@ -1509,6 +1723,10 @@ globalThis.fetch = async () => new Response(JSON.stringify({
 });
 `,
   );
+  writeBackgroundRemoveSuccessStub(
+    backgroundRemoveStubPath,
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==",
+  );
   try {
     const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
     const result = childProcess.spawnSync(
@@ -1530,12 +1748,16 @@ globalThis.fetch = async () => new Response(JSON.stringify({
         env: {
           ...process.env,
           CODEX_HOME: codexHome,
+          GPT_IMAGE_2_BG_REMOVE_SCRIPT: backgroundRemoveStubPath,
         },
       },
     );
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.command, "transparent generate");
+    assert.equal(payload.selected_strategy, "background-remove");
+    assert.equal(payload.attempts[0].strategy, "background-remove");
+    assert.equal(payload.attempts[0].selected, true);
     assert.equal(payload.verification.passed, true);
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {

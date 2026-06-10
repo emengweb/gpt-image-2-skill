@@ -1,6 +1,6 @@
 ---
 name: gpt-image-2-skill
-description: This skill should be used when the user asks to "generate an image", "create a logo", "draw an icon", "edit this photo", "change background to transparent", "remove background", "use GPT image", "use Codex to draw", "用 GPT image 生成图片", "用 Codex 画图", "帮我生成一张图", "改成透明背景", "把这张图编辑一下", or any prompt-to-image or reference-image-edit task that benefits from a structured CLI returning JSON results and JSONL progress events. Supports OpenAI `gpt-image-2` (via `OPENAI_API_KEY` or OpenAI-compatible base URL) and Codex `image_generation` (via `~/.codex/auth.json`) under one command surface, with masks, custom sizes up to 4K, transparent backgrounds, and a raw request escape hatch.
+description: This skill should be used when the user asks to "generate an image", "create a logo", "draw an icon", "edit this photo", "change background to transparent", "remove background", "transparent background", "cut out", "isolate subject", "remove bg", "make transparent", "extract subject", "background removal", "批量抠图", "用 GPT image 生成图片", "用 Codex 画图", "帮我生成一张图", "改成透明背景", "抠图", "把背景去掉", "把这张图编辑一下", or any prompt-to-image, reference-image-edit, standalone background-removal, or transparent PNG delivery task that benefits from a structured CLI returning JSON results and JSONL progress events. Supports OpenAI `gpt-image-2` (via `OPENAI_API_KEY` or OpenAI-compatible base URL), Codex `image_generation` (via `~/.codex/auth.json`), and merged `background-remove` local cutout workflows under one command surface, with masks, custom sizes up to 4K, transparent PNG verification, single-image and batch background removal, and a raw request escape hatch.
 ---
 
 Run image generation and editing through one CLI surface that hides provider differences. The runtime in `scripts/` is now pure TypeScript plus a thin CJS launcher.
@@ -22,6 +22,7 @@ SKILL_CMD="gpt-image-2-skill"
 - Switch between `OPENAI_API_KEY`, an OpenAI-compatible base URL, and Codex `auth.json` without changing command shape.
 - Respect shared provider config at `$CODEX_HOME/gpt-image-2-skill/config.json` so CLI, App, and Skill use the same default provider.
 - Need final transparent PNG deliverables, masks, custom sizes up to 4K, or raw request bodies.
+- Need direct background removal without image generation, including environment checks and initialization hints.
 - Want live progress events (retries, multipart prep, Codex SSE) on stderr while the final JSON lands on stdout.
 
 ## Quick start
@@ -55,18 +56,23 @@ $SKILL_CMD --json --json-events \
 # 5. Remove a controlled background from existing source images
 $SKILL_CMD --json \
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \
-  --method chroma --matte-color auto --strict
+  --method auto --matte-color auto --strict
 
-# 6. Verify the final file before delivery
+# 6. Run standalone background-removal environment checks or direct cutouts
+$SKILL_CMD --json background doctor
+$SKILL_CMD --json background init
+$SKILL_CMD --json background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.png
+
+# 7. Verify the final file before delivery
 $SKILL_CMD --json \
   transparent verify --input /tmp/asset.png --profile icon --strict
 
-# 7. Raw request escape hatch
+# 8. Raw request escape hatch
 $SKILL_CMD --json \
   request create --request-operation generate \
   --body-file /tmp/body.json --out-image /tmp/out.png --expect-image
 
-# 8. Optional smoke check
+# 9. Optional smoke check
 $SKILL_CMD --json doctor
 ```
 
@@ -84,6 +90,24 @@ $SKILL_CMD --json doctor
 ```
 
 If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
+
+For standalone cutout workflows, run `background doctor` or `background init` first. They validate Python, the merged `background_remove.py` script, and optional packages such as `rembg`, `Pillow`, and `numpy`.
+
+Background-removal prerequisites and behavior:
+
+- `rembg` is the recommended AI method for arbitrary photos, products, hair, fur, and irregular edges.
+- `Pillow` is required for all standalone background-removal flows, including the built-in fallback.
+- `numpy` is optional; it speeds up the built-in method but is not required.
+- The first successful `rembg` run may download the U2-Net model (roughly 170 MB) and cache it locally.
+
+Typical installs:
+
+```bash
+pip install Pillow
+pip install rembg
+# or, when GPU/CUDA support is desired:
+pip install rembg[gpu]
+```
 
 ## Shared config
 
@@ -129,9 +153,59 @@ The prompt is for "what is in the picture"; background, size, format, count, and
 
 For transparent output, do not rely on provider-native transparency. Use the `transparent` command group as the Agent-facing tool layer:
 
-- `transparent generate` — prompt-to-final PNG. It generates a controlled matte source, extracts alpha locally, verifies the result, and only succeeds when the final PNG passes transparency checks.
-- `transparent extract` — local background removal from controlled source images you generated yourself. It is not a general-purpose background remover for arbitrary photos.
+- `transparent generate` — prompt-to-final PNG. It generates a controlled matte source, tries the integrated `background-remove` pipeline first, falls back to local chroma extraction when needed, verifies the result, and only succeeds when the final PNG passes transparency checks.
+- `transparent extract` — local background removal with an integrated `background-remove` first pass and built-in chroma/dual fallback. Use it for generated matte sources first, but it can also attempt arbitrary-photo cutouts before falling back.
 - `transparent verify` — final gate for any PNG before delivery. Use `--strict` and the right `--profile` when the file must be accepted or fail the task.
+- `background doctor` — merged environment check for direct background removal. It reports Python/script readiness, dependency status, and install hints.
+- `background init` — merged initialization helper. It tells you whether the local environment is already ready and what to install otherwise.
+- `background remove` — direct single-image or batch cutout command. It preserves the original `background-remove` skill use cases under the unified CLI.
+
+## Standalone background removal
+
+Use the `background` command group when the user wants direct cutouts rather than a generated transparent asset pipeline.
+
+Recommended direct-cutout workflow:
+
+1. Confirm the source image or list of source images.
+2. Prefer `background remove --method rembg` for photos, products, portraits, hair, fur, or mixed backgrounds.
+3. Prefer `background remove --method builtin` for icons, logos, screenshots, and graphics with mostly white or light neutral backgrounds.
+4. If the user does not specify an output path, keep the default `_nobg` suffix behavior in the same directory.
+5. Deliver PNG by default unless the user explicitly wants WebP or a custom output path with `.webp`.
+
+Direct-cutout quick examples:
+
+```bash
+# Single image, default AI method, custom PNG output
+$SKILL_CMD --json \
+  background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.png
+
+# Single image, built-in fast method for white-background graphics
+$SKILL_CMD --json \
+  background remove --input /tmp/icon.png --method builtin
+
+# Batch processing into an output directory
+$SKILL_CMD --json \
+  background remove --input /tmp/a.jpg /tmp/b.png /tmp/c.webp \
+  --output /tmp/transparent_batch
+
+# WebP output by extension
+$SKILL_CMD --json \
+  background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.webp
+```
+
+Direct-cutout method guidance:
+
+| Method | Best for | Notes |
+|---|---|---|
+| `rembg` | photos, products, portraits, complex edges, arbitrary backgrounds | default direct-cutout method; uses the merged `background-remove` AI pipeline |
+| `builtin` | icons, logos, screenshots, graphics with clean white backgrounds | faster, simpler, may produce artifacts on complex photos |
+
+Standalone background-removal output behavior:
+
+- One input + no `--output`: save beside the source with `_nobg` suffix and `.png`
+- Multiple inputs + `--output <dir>`: save each result into that directory with `_nobg.png`
+- Output format follows the output extension: `.png` or `.webp`
+- PNG is the safest default for final transparent deliverables
 
 A transparent deliverable is valid only if the final file has a real PNG alpha channel and passes verification. A visual appearance of transparency, a white background, or a checkerboard pattern is not sufficient.
 
@@ -153,8 +227,8 @@ The CLI is intentionally not a material classifier. The Agent should choose gene
 
 | Asset type | Generation guidance | Extraction guidance |
 |---|---|---|
-| Opaque object, icon, sticker, product | Single isolated subject, clear margin, perfectly flat chroma matte. Pick a matte color absent from the object. | `transparent generate` or `transparent extract --method chroma --matte-color auto` |
-| Thin edges, hair, fur, lace, chain, netting | Use high resolution, strong subject/background contrast, no contact shadow, no background-colored details. Try magenta/cyan/green mattes if one contaminates the edge. | Chroma extraction with `--spill-suppression` when needed, then verify with `--expected-matte-color`; retry with a different matte if residue remains. |
+| Opaque object, icon, sticker, product | Single isolated subject, clear margin, perfectly flat chroma matte. Pick a matte color absent from the object. | `transparent generate` or `transparent extract --method auto --matte-color auto`; the runtime tries `background-remove` first, then chroma fallback if verification or extraction fails. |
+| Thin edges, hair, fur, lace, chain, netting | Use high resolution, strong subject/background contrast, no contact shadow, no background-colored details. Try magenta/cyan/green mattes if one contaminates the edge. | `background-remove` first, then chroma extraction with `--spill-suppression` when needed; verify with `--expected-matte-color` and retry with a different matte if residue remains. |
 | Glass, crystal, liquid, hologram | Ask for a centered asset on flat black and flat white backgrounds, keeping geometry identical. Use reference/edit flow when possible to keep alignment. | `transparent extract --method dual --dark-image black.png --light-image white.png` |
 | Glow, flame, smoke, mist, magic particles | Generate dark and light background variants. Avoid textured backgrounds and avoid bloom reaching the image edge unless the edge is intentional. | Prefer dual extraction; verify that `partial_pixels` is non-zero. |
 | Shadows | Decide whether the shadow is part of the asset. If not, explicitly forbid contact shadows. If yes, generate on a flat matte with enough margin. | Chroma for opaque shadow silhouettes; dual extraction for soft translucent shadows. |
@@ -177,13 +251,13 @@ $SKILL_CMD --json --json-events \
   --prompt "a polished fantasy sword game asset, no text, no frame" \
   --out /tmp/sword.png --size 2K --quality high
 
-# Agent-controlled chroma flow
+# Agent-controlled single-image cutout flow (`background-remove` first, chroma fallback)
 $SKILL_CMD --json --json-events \
   images generate \
   --prompt "a silver necklace, centered, on a perfectly flat pure magenta background, no shadow" \
   --out /tmp/necklace-magenta.png --format png --size 2K
 $SKILL_CMD --json \
-  transparent extract --method chroma \
+  transparent extract --method auto \
   --input /tmp/necklace-magenta.png --matte-color auto \
   --out /tmp/necklace.png --material sticker --strict
 
@@ -196,6 +270,25 @@ $SKILL_CMD --json \
 ```
 
 Always inspect the JSON verification fields before delivery: `passed`, `alpha_min`, `alpha_max`, `transparent_ratio`, `partial_pixels`, and `warnings`. Also inspect quality fields: `checkerboard_detected`, `touches_edge`, `edge_margin_px`, `stray_pixel_count`, `largest_component_ratio`, `matte_residue_checked`, `matte_residue_score`, `halo_score`, `transparent_rgb_scrubbed`, `alpha_health_score`, `residue_score`, `quality_score`, and `failure_reasons`. If `passed` is false, do not deliver the file as a transparent PNG. If `matte_residue_checked` is false for a chroma-derived PNG, run `transparent verify` again with the source matte via `--expected-matte-color`.
+
+For `transparent generate` and `transparent extract`, also inspect `selected_strategy` and `attempts` in JSON output. They tell you whether the final asset came from integrated `background-remove`, built-in chroma fallback, or dual extraction.
+
+`transparent extract --method` now has explicit semantics:
+
+- `auto` — prefer merged `background-remove`, then fallback to built-in chroma
+- `rembg` — force merged `background-remove` only
+- `chroma` — force built-in chroma only
+- `dual` — force black/white dual-background extraction
+
+For direct cutout tasks, prefer `background remove` over `transparent extract` unless you explicitly need controlled matte extraction or transparent-verification profiles.
+
+Direct-cutout error handling and retries:
+
+- If `rembg` is unavailable, install it or intentionally switch to `--method builtin`
+- If the built-in method leaves artifacts on a photo, retry with `--method rembg`
+- If an image is missing or corrupt, fix the input path before retrying
+- For large batches, expect partial failures to surface in structured JSON; inspect per-item `results`
+- For arbitrary-photo cutouts where edge quality matters, prefer `background remove` first, then use `transparent verify` only if the task truly requires transparent PNG acceptance gating
 
 ## Notes
 
@@ -215,6 +308,7 @@ Load on demand for deeper detail:
 - `references/json-output.md` — `--json` stdout schema, success and error envelopes, per-command shapes.
 - `references/json-events.md` — `--json-events` JSONL phases (`request_started`, `multipart_prepared`, `retry_scheduled`) and Codex SSE passthrough.
 - `references/troubleshooting.md` — install / command-not-found fixes, `auth_missing`, Codex `401` refresh, retry policy, size rejections, moderation, timeouts.
+- `../../docs/planned-transparent-background-strategy.md` — planned deterministic matte-color selection and transparent-intent routing improvements.
 
 ## Codex compatibility
 

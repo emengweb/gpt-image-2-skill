@@ -1,7 +1,7 @@
 {
   "name": "gpt-image-2-skill",
   "version": "0.3.8",
-  "description": "Agent-first GPT Image 2 CLI for OpenAI API keys and Codex auth.",
+  "description": "Agent-first GPT Image 2 CLI for OpenAI, Codex, transparent PNG workflows, and merged local background removal.",
   "license": "MIT",
   "homepage": "https://github.com/emengweb/gpt-image-2-skill",
   "repository": {
@@ -19,6 +19,7 @@
     "*.cjs",
     "*.ts",
     "*.d.ts",
+    "*.py",
     "README.md",
     "package.json"
   ],

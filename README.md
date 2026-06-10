@@ -19,11 +19,12 @@
 
 ## 功能特性
 
-- `images generate`、`images edit`、`transparent generate/extract/verify`、`request create`
+- `images generate`、`images edit`、`transparent generate/extract/verify`、`background remove/doctor/init`、`request create`
 - OpenAI `gpt-image-2` 与兼容服务端，支持自定义 `--openai-api-base`
 - Codex `auth.json` 图片链路，默认模型 `gpt-5.4`
 - `--json` stdout 结果与 `--json-events` stderr JSONL 进度事件
-- 透明 PNG 本地抠图、验证、尺寸别名与共享配置
+- 融合 `background-remove` 的透明 PNG 主抠图链路，失败时自动回退到内建 chroma/dual 提取
+- 透明 PNG 验证、尺寸别名与共享配置
 - React Web 前端位于 `apps/gpt-image-2-app`
 - Cloudflare relay Worker 位于 `workers/gpt-image-2-relay`
 
@@ -78,6 +79,26 @@ gpt-image-2-skill --json --json-events \
   --out ./apple.png
 ```
 
+透明 PNG 工作流说明：
+
+- `transparent generate` 会先生成受控底图，再优先使用融合后的 `background-remove` 做抠图，失败或验证不佳时自动回退到当前 skill 内建的 chroma 提取。
+- `transparent extract --method auto` 会优先走 `background-remove`，若失败再回退到当前 skill 的 chroma/dual 抠图逻辑。
+- `transparent extract --method rembg` 表示强制只走融合后的 `background-remove`；`--method chroma` 表示强制只走本地 chroma。
+- JSON 输出里的 `selected_strategy` 与 `attempts` 可用于判断最终命中的抠图路径。
+
+独立抠图与初始化说明：
+
+- `background doctor` 用于检查 Python、`rembg`、`Pillow`、脚本是否齐备。
+- `background init` 用于返回当前环境是否已经可用以及下一步安装提示。
+- `background remove` 用于单图或批量抠图，完整保留 `background-remove` 的独立使用方式。
+
+```bash
+gpt-image-2-skill --json background doctor
+gpt-image-2-skill --json background init
+gpt-image-2-skill --json background remove --input ./photo.jpg --output ./photo_nobg.png
+gpt-image-2-skill --json background remove --input ./a.png ./b.png --output ./out --method builtin
+```
+
 **Profile**(`--profile`,验证用)— 决定质量门严格度:
 
 | Profile | 适用 | 额外严格项 |
@@ -115,6 +136,8 @@ just dev-frontend
 ```
 
 版本同步与发布脚本位于 `scripts/release/`，现在基于 npm 包 `skills/gpt-image-2-skill/scripts/package.json` 作为版本源。
+
+未来待实现能力说明见 [docs/planned-transparent-background-strategy.md](/Users/emengweb/Documents/Project/gpt-image-2-skill/docs/planned-transparent-background-strategy.md)。
 
 ## 仓库结构
 

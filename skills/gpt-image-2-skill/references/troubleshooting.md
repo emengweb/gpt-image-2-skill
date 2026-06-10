@@ -2,6 +2,8 @@
 
 Decision tree for the most common failures. Always run `--json doctor` first to confirm runtime, provider auth, and retry policy in one shot.
 
+For direct cutout issues, also run `--json background doctor` or `--json background init` to confirm the merged background-removal runtime is available.
+
 ## `gpt-image-2-skill: command not found`
 
 The TypeScript CLI is not installed or is missing from `PATH`.
@@ -116,6 +118,26 @@ Use `failure_reasons` from the JSON to pick the retry:
 ## `transparent_input_mismatch`
 
 Dual extraction requires black/white source images with identical dimensions. Regenerate both images with the same `--size`, or use reference-image editing to preserve alignment.
+
+## `background remove` is not ready
+
+The merged standalone background-removal workflow depends on local Python packages.
+
+Checks:
+
+- `gpt-image-2-skill --json background doctor`
+- `gpt-image-2-skill --json background init`
+
+Typical fixes:
+
+- install Python 3 if no Python runtime is detected
+- `pip install Pillow`
+- `pip install rembg[gpu]` or `pip install rembg`
+
+Notes:
+
+- `rembg` is optional for the fast built-in method, but `Pillow` is still required
+- `numpy` is optional; the built-in fallback works without it, but may be slower
 
 ## Moderation refusals (OpenAI)
 

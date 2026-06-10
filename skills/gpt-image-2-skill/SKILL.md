@@ -58,9 +58,11 @@ $SKILL_CMD --json \
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \
   --method auto --matte-color auto --strict
 
-# 6. Run standalone background-removal environment checks or direct cutouts
+# 6. Run standalone background-removal environment checks, optional dependency install, or direct cutouts
 $SKILL_CMD --json background doctor
+$SKILL_CMD --json background doctor --fix
 $SKILL_CMD --json background init
+$SKILL_CMD --json background init --install
 $SKILL_CMD --json background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.png
 
 # 7. Verify the final file before delivery
@@ -91,7 +93,7 @@ $SKILL_CMD --json doctor
 
 If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
 
-For standalone cutout workflows, run `background doctor` or `background init` first. They validate Python, the merged `background_remove.py` script, and optional packages such as `rembg`, `Pillow`, and `numpy`.
+For standalone cutout workflows, run `background doctor` or `background init` first. They validate Python, the merged `background_remove.py` script, and optional packages such as `rembg`, `Pillow`, and `numpy`. Dependency installation is explicit only: `background init --install` or `background doctor --fix`.
 
 Background-removal prerequisites and behavior:
 
@@ -108,6 +110,12 @@ pip install rembg
 # or, when GPU/CUDA support is desired:
 pip install rembg[gpu]
 ```
+
+Auto-install behavior:
+
+- The runtime never installs Python packages implicitly during ordinary `background remove`, `transparent extract`, or `transparent generate` calls.
+- Use `background init --install` to explicitly install missing `Pillow`, `rembg`, and optional `numpy`.
+- Use `background doctor --fix` as a synonym when you want the environment report plus the same explicit install attempt in one step.
 
 ## Shared config
 
@@ -156,9 +164,11 @@ For transparent output, do not rely on provider-native transparency. Use the `tr
 - `transparent generate` — prompt-to-final PNG. It generates a controlled matte source, tries the integrated `background-remove` pipeline first, falls back to local chroma extraction when needed, verifies the result, and only succeeds when the final PNG passes transparency checks.
 - `transparent extract` — local background removal with an integrated `background-remove` first pass and built-in chroma/dual fallback. Use it for generated matte sources first, but it can also attempt arbitrary-photo cutouts before falling back.
 - `transparent verify` — final gate for any PNG before delivery. Use `--strict` and the right `--profile` when the file must be accepted or fail the task.
-- `background doctor` — merged environment check for direct background removal. It reports Python/script readiness, dependency status, and install hints.
-- `background init` — merged initialization helper. It tells you whether the local environment is already ready and what to install otherwise.
+- `background doctor` — merged environment check for direct background removal. It reports Python/script readiness, dependency status, and install hints. Add `--fix` to explicitly install missing Python packages.
+- `background init` — merged initialization helper. It tells you whether the local environment is already ready and what to install otherwise. Add `--install` to explicitly install missing Python packages.
 - `background remove` — direct single-image or batch cutout command. It preserves the original `background-remove` skill use cases under the unified CLI.
+
+`transparent generate` now also reports `final_background_intent`, `selected_matte_color`, and `intermediate_extraction_background` in JSON so the agent can see the deterministic matte choice and retry candidates used internally.
 
 ## Standalone background removal
 
@@ -227,7 +237,7 @@ The CLI is intentionally not a material classifier. The Agent should choose gene
 
 | Asset type | Generation guidance | Extraction guidance |
 |---|---|---|
-| Opaque object, icon, sticker, product | Single isolated subject, clear margin, perfectly flat chroma matte. Pick a matte color absent from the object. | `transparent generate` or `transparent extract --method auto --matte-color auto`; the runtime tries `background-remove` first, then chroma fallback if verification or extraction fails. |
+| Opaque object, icon, sticker, product | Single isolated subject, clear margin, perfectly flat matte. Prefer black or white first; only fall back to a colored matte if either one blends into the subject. | `transparent generate` or `transparent extract --method auto --matte-color auto`; the runtime tries `background-remove` first, then chroma fallback if verification or extraction fails. |
 | Thin edges, hair, fur, lace, chain, netting | Use high resolution, strong subject/background contrast, no contact shadow, no background-colored details. Try magenta/cyan/green mattes if one contaminates the edge. | `background-remove` first, then chroma extraction with `--spill-suppression` when needed; verify with `--expected-matte-color` and retry with a different matte if residue remains. |
 | Glass, crystal, liquid, hologram | Ask for a centered asset on flat black and flat white backgrounds, keeping geometry identical. Use reference/edit flow when possible to keep alignment. | `transparent extract --method dual --dark-image black.png --light-image white.png` |
 | Glow, flame, smoke, mist, magic particles | Generate dark and light background variants. Avoid textured backgrounds and avoid bloom reaching the image edge unless the edge is intentional. | Prefer dual extraction; verify that `partial_pixels` is non-zero. |

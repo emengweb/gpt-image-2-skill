@@ -10,6 +10,7 @@ import { JsonEventWriter } from "./json-events.ts";
 import type { ProviderConfig } from "./types.ts";
 import { buildCodexImageBody, runCodexImageCommand, runCodexRequestCreate } from "./codex-client.ts";
 import { runTransparentExtract, runTransparentVerify } from "./transparent-client.ts";
+import { chooseMatteColor } from "./transparent-core.ts";
 import { resolveUserAgent } from "./config-store.ts";
 import { normalizeAndValidateImageSize, normalizeImageSizeInBody } from "./image-size.ts";
 import { loadImageSourceBytes } from "./image-sources.ts";
@@ -135,6 +136,59 @@ raise SystemExit(1)
   );
 }
 
+function writeBackgroundPythonInstallerStub(filePath: string) {
+  fs.writeFileSync(
+    filePath,
+    `#!/bin/sh
+set -eu
+STATE_FILE="\${BG_REMOVE_STUB_STATE:?missing BG_REMOVE_STUB_STATE}"
+if [ ! -f "$STATE_FILE" ]; then
+  printf '{"pillow":false,"rembg":false,"numpy":false}' > "$STATE_FILE"
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "--version" ]; then
+  printf 'Python 3.11.9\\n'
+  exit 0
+fi
+if [ "$#" -ge 2 ] && [ "$1" = "-c" ]; then
+  node -e '
+const fs = require("fs");
+const state = JSON.parse(fs.readFileSync(process.env.BG_REMOVE_STUB_STATE, "utf8"));
+process.stdout.write(JSON.stringify({
+  rembg: { installed: !!state.rembg, version: state.rembg ? "2.0.76" : null, error: state.rembg ? null : "missing" },
+  pillow: { installed: !!state.pillow, version: state.pillow ? "12.2.0" : null, error: state.pillow ? null : "missing" },
+  numpy: { installed: !!state.numpy, version: state.numpy ? "2.4.6" : null, error: state.numpy ? null : "missing" }
+}));
+'
+  exit 0
+fi
+if [ "$#" -ge 4 ] && [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "install" ]; then
+  node -e '
+const fs = require("fs");
+const statePath = process.env.BG_REMOVE_STUB_STATE;
+const logPath = process.env.BG_REMOVE_STUB_LOG;
+const args = process.argv.slice(1);
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+for (const pkg of args) {
+  if (pkg === "--user") continue;
+  if (pkg === "Pillow") state.pillow = true;
+  if (pkg === "rembg") state.rembg = true;
+  if (pkg === "numpy") state.numpy = true;
+}
+fs.writeFileSync(statePath, JSON.stringify(state));
+fs.writeFileSync(logPath, JSON.stringify({ args }));
+process.stdout.write("installed");
+' -- "$@"
+  exit 0
+fi
+printf 'unexpected args:'
+printf ' %s' "$@"
+printf '\\n' >&2
+exit 1
+`,
+    { mode: 0o755 },
+  );
+}
+
 test("generate body defaults to response_format=b64_json and stream=false", () => {
   const body = buildGenerateBody(provider(), {
     prompt: "hello",
@@ -200,6 +254,26 @@ test("resolveUserAgent defaults to OpenAI/JS 4.96.0 and trims custom values", ()
   assert.equal(resolveUserAgent({}), "OpenAI/JS 4.96.0");
   assert.equal(resolveUserAgent({ user_agent: "  MyApp/1.0  " }), "MyApp/1.0");
   assert.equal(resolveUserAgent({ user_agent: "   " }), "OpenAI/JS 4.96.0");
+});
+
+test("chooseMatteColor avoids subject colors and keeps retry order deterministic", () => {
+  const choice = chooseMatteColor("a green frog with white milk and black smoke", "icon");
+  assert.notEqual(choice.selected_matte_name, "green");
+  assert.notEqual(choice.selected_matte_name, "white");
+  assert.notEqual(choice.selected_matte_name, "black");
+  assert.equal(choice.candidate_order[0].name, choice.selected_matte_name);
+  assert.equal(choice.retry_candidates[0], choice.candidate_order[1]?.color);
+});
+
+test("chooseMatteColor prefers high-contrast mattes for glow assets", () => {
+  const choice = chooseMatteColor("a soft glowing orb", "glow");
+  assert.equal(choice.selected_matte_name, "black");
+  assert.equal(choice.retry_candidates[0], "#ffffff");
+});
+
+test("chooseMatteColor prefers white when the prompt suggests a dark subject", () => {
+  const choice = chooseMatteColor("a black leather wallet on display", "product");
+  assert.equal(choice.selected_matte_name, "white");
 });
 
 test("requestGenerate rejects empty b64_json instead of writing a zero-byte file", async () => {
@@ -1563,6 +1637,58 @@ test("transparent extract auto falls back to local chroma when background-remove
   }
 });
 
+test("transparent extract auto prefers higher-quality chroma when both strategies pass", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const inputPath = path.join(tempDir, "magenta-source.png");
+  const outPath = path.join(tempDir, "magenta-output.png");
+  const backgroundRemoveStubPath = path.join(tempDir, "background-remove-success.py");
+  const backgroundRemoveOutputPath = path.join(tempDir, "background-remove-stub-output.png");
+  const matte: [number, number, number] = [249, 14, 242];
+  const subject: [number, number, number] = [235, 235, 235];
+  writeRgbaPng(inputPath, 9, 9, (x, y) => {
+    if (x >= 3 && x <= 5 && y >= 2 && y <= 7) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [matte[0], matte[1], matte[2], 255];
+  });
+  writeRgbaPng(backgroundRemoveOutputPath, 9, 9, (x, y) => {
+    if (x >= 3 && x <= 5 && y >= 2 && y <= 7) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    if ((x === 0 && y === 0) || (x === 8 && y === 0) || (x === 0 && y === 8) || (x === 8 && y === 8)) {
+      return [subject[0], subject[1], subject[2], 255];
+    }
+    return [0, 0, 0, 0];
+  });
+  writeBackgroundRemoveSuccessStub(
+    backgroundRemoveStubPath,
+    fs.readFileSync(backgroundRemoveOutputPath).toString("base64"),
+  );
+  const previousScript = process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+  process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = backgroundRemoveStubPath;
+  try {
+    const payload = await runTransparentExtract({
+      method: "auto",
+      input: inputPath,
+      out: outPath,
+      profile: "generic",
+      matteColor: "#f90ef2",
+      strict: true,
+    });
+    assert.equal(payload.selected_strategy, "chroma");
+    assert.equal(payload.attempts.length, 2);
+    assert.equal(payload.attempts[0].strategy, "background-remove");
+    assert.equal(payload.attempts[0].passed, true);
+    assert.equal(payload.attempts[1].strategy, "chroma");
+    assert.equal(payload.attempts[1].selected, true);
+    assert.ok((payload.attempts[1].quality_score ?? 0) > (payload.attempts[0].quality_score ?? 0));
+  } finally {
+    if (previousScript === undefined) delete process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT;
+    else process.env.GPT_IMAGE_2_BG_REMOVE_SCRIPT = previousScript;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("transparent extract chroma mode bypasses background-remove attempts", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
   const inputPath = path.join(tempDir, "magenta-source.png");
@@ -1632,6 +1758,78 @@ test("background init returns next steps", () => {
   assert.equal(typeof payload.initialized, "boolean");
   assert.equal(Array.isArray(payload.next_steps), true);
   assert.ok(payload.next_steps.length >= 1);
+});
+
+test("background init --install installs missing dependencies explicitly", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+  const pythonStubPath = path.join(tempDir, "python-installer-stub.sh");
+  const statePath = path.join(tempDir, "deps.json");
+  const logPath = path.join(tempDir, "pip-log.json");
+  writeBackgroundPythonInstallerStub(pythonStubPath);
+  fs.writeFileSync(statePath, JSON.stringify({ pillow: false, rembg: false, numpy: false }));
+  try {
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [cliPath, "--json", "background", "init", "--install"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GPT_IMAGE_2_BG_REMOVE_PYTHON: pythonStubPath,
+          BG_REMOVE_STUB_STATE: statePath,
+          BG_REMOVE_STUB_LOG: logPath,
+          GPT_IMAGE_2_BG_REMOVE_PIP_USER: "0",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.command, "background init");
+    assert.equal(payload.initialized, true);
+    assert.equal(payload.install.attempted, true);
+    assert.equal(payload.install.ok, true);
+    assert.deepEqual(payload.install.requested_dependencies, ["pillow", "rembg", "numpy"]);
+    const pipLog = JSON.parse(fs.readFileSync(logPath, "utf8"));
+    assert.deepEqual(pipLog.args.slice(0, 4), ["-m", "pip", "install", "Pillow"]);
+    assert.deepEqual(pipLog.args.slice(4), ["rembg", "numpy"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("background doctor --fix exposes the same explicit install path", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+  const pythonStubPath = path.join(tempDir, "python-installer-stub.sh");
+  const statePath = path.join(tempDir, "deps.json");
+  const logPath = path.join(tempDir, "pip-log.json");
+  writeBackgroundPythonInstallerStub(pythonStubPath);
+  fs.writeFileSync(statePath, JSON.stringify({ pillow: true, rembg: false, numpy: false }));
+  try {
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [cliPath, "--json", "background", "doctor", "--fix"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GPT_IMAGE_2_BG_REMOVE_PYTHON: pythonStubPath,
+          BG_REMOVE_STUB_STATE: statePath,
+          BG_REMOVE_STUB_LOG: logPath,
+          GPT_IMAGE_2_BG_REMOVE_PIP_USER: "0",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.command, "background doctor");
+    assert.equal(payload.ready, true);
+    assert.equal(payload.install.attempted, true);
+    assert.deepEqual(payload.install.requested_dependencies, ["rembg", "numpy"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("background remove supports multiple inputs through the merged CLI", () => {
@@ -1756,6 +1954,10 @@ globalThis.fetch = async () => new Response(JSON.stringify({
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.command, "transparent generate");
     assert.equal(payload.selected_strategy, "background-remove");
+    assert.equal(payload.request.final_background_intent, "transparent");
+    assert.equal(payload.request.selected_matte_color, "#000000");
+    assert.equal(payload.request.intermediate_extraction_background.selected_matte_color, "#000000");
+    assert.equal(payload.source.attempts[0].matte_color, "#000000");
     assert.equal(payload.attempts[0].strategy, "background-remove");
     assert.equal(payload.attempts[0].selected, true);
     assert.equal(payload.verification.passed, true);

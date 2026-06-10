@@ -51,6 +51,24 @@ export type BackgroundRemoveRunResult = {
   error: string | null;
 };
 
+export type BackgroundRemoveInstallResult = {
+  attempted: boolean;
+  ok: boolean;
+  python: string | null;
+  pythonVersion: string | null;
+  usedUserSite: boolean;
+  requestedDependencies: Array<"rembg" | "pillow" | "numpy">;
+  requestedPackages: string[];
+  alreadySatisfied: Array<"rembg" | "pillow" | "numpy">;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+  environmentBefore: BackgroundRemoveEnvironment;
+  environmentAfter: BackgroundRemoveEnvironment;
+  command: string[];
+};
+
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SCRIPT_PATH = path.join(SCRIPT_DIR, "background_remove.py");
 
@@ -197,6 +215,92 @@ export function inspectBackgroundRemoveEnvironment(): BackgroundRemoveEnvironmen
   };
 }
 
+export function installBackgroundRemoveDependencies(input?: {
+  includeOptional?: boolean;
+}): BackgroundRemoveInstallResult {
+  const environmentBefore = inspectBackgroundRemoveEnvironment();
+  const pythonInfo = resolvePythonExecutableInfo();
+  const includeOptional = input?.includeOptional ?? true;
+  const requestedDependencies = dependenciesToInstall(environmentBefore, includeOptional);
+  const alreadySatisfied = (["pillow", "rembg", "numpy"] as const).filter((dependency) => !requestedDependencies.includes(dependency));
+  if (!pythonInfo.command) {
+    return {
+      attempted: false,
+      ok: false,
+      python: null,
+      pythonVersion: null,
+      usedUserSite: false,
+      requestedDependencies,
+      requestedPackages: requestedDependencies.map((dependency) => packageNameForDependency(dependency)),
+      alreadySatisfied,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      error: "No Python runtime found for background dependency installation.",
+      environmentBefore,
+      environmentAfter: environmentBefore,
+      command: [],
+    };
+  }
+  if (requestedDependencies.length === 0) {
+    return {
+      attempted: false,
+      ok: environmentBefore.ready,
+      python: pythonInfo.command,
+      pythonVersion: pythonInfo.version,
+      usedUserSite: false,
+      requestedDependencies: [],
+      requestedPackages: [],
+      alreadySatisfied,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      error: null,
+      environmentBefore,
+      environmentAfter: environmentBefore,
+      command: [],
+    };
+  }
+  const requestedPackages = requestedDependencies.map((dependency) => packageNameForDependency(dependency));
+  const command = ["-m", "pip", "install"];
+  const usedUserSite = shouldUseUserSiteInstall();
+  if (usedUserSite) {
+    command.push("--user");
+  }
+  command.push(...requestedPackages);
+  const result = childProcess.spawnSync(
+    pythonInfo.command,
+    command,
+    {
+      encoding: "utf8",
+    },
+  );
+  const environmentAfter = inspectBackgroundRemoveEnvironment();
+  const installSucceeded = requestedDependencies.every((dependency) => dependencyInstalled(environmentAfter, dependency));
+  const error =
+    result.error?.message ||
+    (result.status === 0 && installSucceeded
+      ? null
+      : (result.stderr || result.stdout || "").trim() || "Background dependency installation failed.");
+  return {
+    attempted: true,
+    ok: !error,
+    python: pythonInfo.command,
+    pythonVersion: pythonInfo.version,
+    usedUserSite,
+    requestedDependencies,
+    requestedPackages,
+    alreadySatisfied,
+    exitCode: result.status,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    error,
+    environmentBefore,
+    environmentAfter,
+    command,
+  };
+}
+
 function normalizeDependencyStatus(
   value: BackgroundRemoveDependencyStatus | undefined,
   probe: childProcess.SpawnSyncReturns<string>,
@@ -263,6 +367,39 @@ function summarizeRunError(payload: Record<string, unknown> | null) {
     if (messages.length) return messages.join("; ");
   }
   return null;
+}
+
+function dependenciesToInstall(environment: BackgroundRemoveEnvironment, includeOptional: boolean) {
+  const requested: Array<"rembg" | "pillow" | "numpy"> = [];
+  if (!environment.dependencies.pillow.installed) requested.push("pillow");
+  if (!environment.dependencies.rembg.installed) requested.push("rembg");
+  if (includeOptional && !environment.dependencies.numpy.installed) requested.push("numpy");
+  return requested;
+}
+
+function dependencyInstalled(
+  environment: BackgroundRemoveEnvironment,
+  dependency: "rembg" | "pillow" | "numpy",
+) {
+  return environment.dependencies[dependency].installed;
+}
+
+function packageNameForDependency(dependency: "rembg" | "pillow" | "numpy") {
+  switch (dependency) {
+    case "pillow":
+      return "Pillow";
+    case "rembg":
+      return "rembg";
+    case "numpy":
+      return "numpy";
+  }
+}
+
+function shouldUseUserSiteInstall() {
+  const override = process.env.GPT_IMAGE_2_BG_REMOVE_PIP_USER?.trim();
+  if (override === "1" || override === "true") return true;
+  if (override === "0" || override === "false") return false;
+  return !process.env.VIRTUAL_ENV && !process.env.CONDA_PREFIX;
 }
 
 function failedRunResult(input: {

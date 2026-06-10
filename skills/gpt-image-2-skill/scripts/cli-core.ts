@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  installBackgroundRemoveDependencies,
   inspectBackgroundRemoveEnvironment,
   runBackgroundRemoveCommand,
 } from "./background-remove-client.ts";
@@ -288,27 +289,27 @@ function handleDoctor(rest: string[], globalProvider?: string) {
 
 function handleBackground(command?: string, rest: string[] = []) {
   if (command === "doctor") {
-    if (rest.length) {
-      throw new CliError("invalid_command", `Unexpected background doctor args: ${rest.join(" ")}`);
-    }
-    const environment = inspectBackgroundRemoveEnvironment();
+    const options = parseBackgroundEnvironmentArgs(rest, "doctor");
+    const install = options.install ? installBackgroundRemoveDependencies({ includeOptional: true }) : null;
+    const environment = install?.environmentAfter ?? inspectBackgroundRemoveEnvironment();
     return {
       ok: true,
       command: "background doctor",
       ready: environment.ready,
       environment: normalizeBackgroundEnvironment(environment),
+      ...(install ? { install: normalizeBackgroundInstall(install) } : {}),
     };
   }
   if (command === "init") {
-    if (rest.length) {
-      throw new CliError("invalid_command", `Unexpected background init args: ${rest.join(" ")}`);
-    }
-    const environment = inspectBackgroundRemoveEnvironment();
+    const options = parseBackgroundEnvironmentArgs(rest, "init");
+    const install = options.install ? installBackgroundRemoveDependencies({ includeOptional: true }) : null;
+    const environment = install?.environmentAfter ?? inspectBackgroundRemoveEnvironment();
     return {
       ok: true,
       command: "background init",
       initialized: environment.ready,
       environment: normalizeBackgroundEnvironment(environment),
+      ...(install ? { install: normalizeBackgroundInstall(install) } : {}),
       next_steps:
         environment.installHints.length > 0
           ? environment.installHints
@@ -891,7 +892,7 @@ function parseTransparentGenerateArgs(rest: string[]) {
     method: "auto" as "auto" | "rembg" | "chroma" | "dual",
     profile: "generic",
     material: undefined as string | undefined,
-    matteColor: "#00ff00",
+    matteColor: undefined as string | undefined,
     sourcePrompt: undefined as string | undefined,
     sourceOut: undefined as string | undefined,
     reportDir: undefined as string | undefined,
@@ -1036,6 +1037,20 @@ function parseBackgroundRemoveArgs(rest: string[]) {
   }
   if (state.method !== "rembg" && state.method !== "builtin") {
     throw new CliError("invalid_argument", "background remove --method must be rembg or builtin.");
+  }
+  return state;
+}
+
+function parseBackgroundEnvironmentArgs(rest: string[], command: "doctor" | "init") {
+  const state = {
+    install: false,
+  };
+  for (const arg of rest) {
+    if (arg === "--install" || arg === "--fix") {
+      state.install = true;
+      continue;
+    }
+    throw new CliError("invalid_command", `Unexpected background ${command} args: ${rest.join(" ")}`);
   }
   return state;
 }
@@ -1239,6 +1254,26 @@ function normalizeBackgroundEnvironment(environment: ReturnType<typeof inspectBa
     dependencies: environment.dependencies,
     methods: environment.methods,
     install_hints: environment.installHints,
+  };
+}
+
+function normalizeBackgroundInstall(install: ReturnType<typeof installBackgroundRemoveDependencies>) {
+  return {
+    attempted: install.attempted,
+    ok: install.ok,
+    python: {
+      resolved: install.python,
+      version: install.pythonVersion,
+    },
+    used_user_site: install.usedUserSite,
+    requested_dependencies: install.requestedDependencies,
+    requested_packages: install.requestedPackages,
+    already_satisfied: install.alreadySatisfied,
+    command: install.command,
+    exit_code: install.exitCode,
+    stdout: install.stdout,
+    stderr: install.stderr,
+    error: install.error,
   };
 }
 

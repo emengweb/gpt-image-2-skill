@@ -56,7 +56,7 @@ Use the prompt to control the scene, not to request alpha directly:
 - Ask for one isolated asset, centered, with clear margin.
 - Ask for a perfectly flat, uniform background color.
 - Forbid gradients, texture, scenery, shadows, reflections, labels, frames, and contact shadows unless they are part of the asset.
-- Pick a background color that does not appear in the object.
+- Prefer black or white as the matte background. If either one would blend into the subject, let the CLI choose another safe matte color deterministically.
 - If a color contaminates edges, retry with magenta, cyan, blue, green, black, or white.
 - If the source was AI-generated, do not assume the requested matte is exact. Let extraction sample it with `--matte-color auto`.
 
@@ -95,6 +95,8 @@ node scripts/gpt_image_2_skill.cjs --json \
 - `rembg`: force merged `background-remove`
 - `chroma`: force built-in chroma only
 - `dual`: force black/white dual extraction
+
+When `transparent generate` falls back to chroma, it now reports the selected intermediate matte color, the rule bucket that picked it, and the retry candidates used for a second safe-matte attempt.
 
 `--matte-color auto` samples the actual source background from image edges and reports the sampled color as `extraction.matte_color` with `matte_color_source: "auto-sampled"` when the chroma path is selected. Use explicit `--matte-color magenta` or `--matte-color '#ff00ff'` only when the source background is known to be exact.
 

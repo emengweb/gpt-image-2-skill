@@ -78,6 +78,20 @@ Common `code` values:
   "ok": true,
   "command": "background doctor",
   "ready": true,
+  "install": {
+    "attempted": false,
+    "ok": true,
+    "python": { "resolved": "python3", "version": "Python 3.11.9" },
+    "used_user_site": false,
+    "requested_dependencies": [],
+    "requested_packages": [],
+    "already_satisfied": ["pillow", "rembg", "numpy"],
+    "command": [],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "",
+    "error": null
+  },
   "environment": {
     "ready": true,
     "script": {
@@ -102,13 +116,29 @@ Common `code` values:
 }
 ```
 
+Pass `background doctor --fix` to request an explicit dependency install attempt before the final environment snapshot is returned.
+
 ### `background init`
 
 ```json
 {
   "ok": true,
   "command": "background init",
-  "initialized": false,
+  "initialized": true,
+  "install": {
+    "attempted": true,
+    "ok": true,
+    "python": { "resolved": "python3", "version": "Python 3.11.9" },
+    "used_user_site": true,
+    "requested_dependencies": ["pillow", "rembg", "numpy"],
+    "requested_packages": ["Pillow", "rembg", "numpy"],
+    "already_satisfied": [],
+    "command": ["-m", "pip", "install", "--user", "Pillow", "rembg", "numpy"],
+    "exit_code": 0,
+    "stdout": "installed",
+    "stderr": "",
+    "error": null
+  },
   "environment": { "...": "same shape as background doctor" },
   "next_steps": [
     "Install Pillow: pip install Pillow",
@@ -116,6 +146,8 @@ Common `code` values:
   ]
 }
 ```
+
+Pass `background init --install` when you want the runtime to explicitly install missing Python dependencies instead of only returning hints.
 
 ### `background remove`
 
@@ -187,11 +219,22 @@ Returns the final verified transparent PNG. The command fails with `transparent_
   "request": {
     "prompt": "...",
     "source_prompt": "...",
+    "final_background_intent": "transparent",
+    "intermediate_extraction_background": {
+      "requested_matte_color": null,
+      "selected_matte_color": "#ff00ff",
+      "selected_matte_name": "magenta",
+      "rule_bucket": "saturated_asset_family",
+      "reason": "saturated matte for compact assets",
+      "retry_candidates": ["#00ffff", "#0000ff"]
+    },
     "method": "chroma",
     "profile": "generic",
     "material": null,
-    "requested_matte_color": "#00ff00",
-    "matte_color": "#00ff00",
+    "requested_matte_color": null,
+    "selected_matte_color": "#ff00ff",
+    "selected_matte_name": "magenta",
+    "matte_color": "#ff00ff",
     "matte_color_source": "auto-sampled",
     "threshold": 28.0,
     "softness": 34.0,
@@ -201,6 +244,17 @@ Returns the final verified transparent PNG. The command fails with `transparent_
   "source": {
     "path": "/tmp/source.png",
     "kept": false,
+    "attempts": [
+      {
+        "attempt": 1,
+        "selected": true,
+        "matte_color": "#ff00ff",
+        "rule_bucket": "saturated_asset_family",
+        "reason": "saturated matte for compact assets",
+        "path": "/tmp/source.png",
+        "source_prompt": "..."
+      }
+    ],
     "generation": { "...": "images generate payload" }
   },
   "extraction": { "method": "chroma", "...": "..." },
@@ -275,7 +329,7 @@ Runs local extraction only. Use `--strict` when the command should fail if verif
 }
 ```
 
-`selected_strategy` tells you which path produced the final file: `background-remove`, `chroma`, or `dual`. `attempts` summarizes every tried path in order so agents can tell when the runtime fell back.
+`selected_strategy` tells you which path produced the final file: `background-remove`, `chroma`, or `dual`. `attempts` summarizes every tried path in order so agents can tell when the runtime fell back. For `transparent generate`, the `request.intermediate_extraction_background` object records the deterministic matte choice, the rule bucket, and any retry candidates.
 
 Method semantics:
 

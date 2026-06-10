@@ -31,6 +31,38 @@ export type TransparentProfile =
 
 export type TransparentMaterial = "standard" | "soft-3d" | "flat-icon" | "sticker" | "glow";
 
+export type MatteColorName = "magenta" | "cyan" | "blue" | "green" | "black" | "white";
+
+export type MatteSelection = {
+  requested_matte_color: string | null;
+  selected_matte_color: string;
+  selected_matte_name: MatteColorName;
+  rule_bucket: string;
+  reason: string;
+  candidate_order: Array<{
+    name: MatteColorName;
+    color: string;
+    score: number;
+    avoided: boolean;
+    reason: string;
+  }>;
+  retry_candidates: string[];
+};
+
+type LegacyMatteSelection = {
+  matte_color: string;
+  matte_color_source: "manual" | "deterministic";
+  rule_bucket: "manual_override" | "glow_contrast" | "saturated_asset_family" | "default_safe_color";
+  reason: string;
+  family: "glow" | "saturated_asset_family" | "default_safe_color";
+  candidates: Array<{
+    matte_color: string;
+    score: number;
+    reasons: string[];
+  }>;
+  retry_candidates: string[];
+};
+
 type ChromaSettings = {
   threshold: number;
   softness: number;
@@ -178,6 +210,130 @@ export function parseMatteColor(value: string) {
 export function controlledMattePrompt(prompt: string, matte: string) {
   const color = colorToHex(parseMatteColor(matte));
   return `${prompt}\n\nExtraction setup: render exactly one isolated asset, centered with a clear margin, on a perfectly flat uniform matte background of pure ${color}. Do not use gradients, texture, vignette, shadows, reflections, contact shadows, scenery, props, labels, frames, or background-colored details. Keep the full subject visible and separated from the matte.`;
+}
+
+export function chooseMatteColor(
+  prompt: string,
+  profile: TransparentProfile = "generic",
+  requestedMatteColor?: string | null,
+): MatteSelection {
+  const manual = requestedMatteColor ? parseMatteColorOrAuto(requestedMatteColor) : null;
+  if (manual) {
+    const selected = colorToHex(manual);
+    return {
+      requested_matte_color: requestedMatteColor ?? null,
+      selected_matte_color: selected,
+      selected_matte_name: matteColorNameForRgb(manual) ?? "magenta",
+      rule_bucket: "manual_override",
+      reason: "user supplied --matte-color override",
+      candidate_order: [
+        {
+          name: matteColorNameForRgb(manual) ?? "magenta",
+          color: selected,
+          score: 0,
+          avoided: false,
+          reason: "manual override",
+        },
+      ],
+      retry_candidates: [],
+    };
+  }
+
+  const normalizedPrompt = prompt.trim().toLowerCase();
+  const family = matteFamily(profile);
+  const preferredNeutral = preferredNeutralMatte(normalizedPrompt);
+  const candidates = mattePalette().map((candidate, index) => {
+    let score = candidate.baseScore[family];
+    const reasons: string[] = [];
+    const avoidance = colorAvoidanceRules(candidate.name);
+    if (candidate.name === preferredNeutral) {
+      score -= 20;
+      reasons.push(`prompt suggests ${preferredNeutral} for best contrast`);
+    } else if (candidate.name === "black" || candidate.name === "white") {
+      score -= 8;
+    }
+    for (const rule of avoidance) {
+      if (rule.matches(normalizedPrompt)) {
+        score += rule.penalty;
+        reasons.push(rule.reason);
+      }
+    }
+    // Break ties deterministically while still keeping the rules code-only.
+    score += index * 0.001;
+    return {
+      name: candidate.name,
+      color: candidate.color,
+      score,
+      avoided: reasons.length > 0,
+      reason:
+        reasons.length > 0
+          ? reasons.join("; ")
+          : candidate.familyReasons[family] ?? "default safe matte choice",
+    };
+  });
+  candidates.sort((a, b) => a.score - b.score || mattePaletteOrder(a.name) - mattePaletteOrder(b.name));
+  const selected = candidates[0]!;
+  const retryCandidates = candidates.slice(1).map((candidate) => candidate.color);
+  return {
+    requested_matte_color: null,
+    selected_matte_color: selected.color,
+    selected_matte_name: selected.name,
+    rule_bucket: matteRuleBucket(selected.name, family, normalizedPrompt),
+    reason: selected.reason,
+    candidate_order: candidates,
+    retry_candidates: retryCandidates,
+  };
+}
+
+function chooseLegacyMatteColor(prompt: string, profile: TransparentProfile): LegacyMatteSelection {
+  const family = classifyMatteFamily(profile);
+  const normalizedPrompt = prompt.toLowerCase();
+  const scored = MATTE_PALETTE.map((matteColor, index) => {
+    const { score, reasons } = scoreMatteCandidate(matteColor, family, normalizedPrompt, index);
+    return { matte_color: matteColor, score, reasons };
+  }).sort((left, right) => right.score - left.score || MATTE_PALETTE.indexOf(left.matte_color as MattePaletteColor) - MATTE_PALETTE.indexOf(right.matte_color as MattePaletteColor));
+  const selected = scored[0] ?? { matte_color: "magenta", score: 0, reasons: ["fallback palette default"] };
+  return {
+    matte_color: selected.matte_color,
+    matte_color_source: "deterministic",
+    rule_bucket:
+      family === "glow"
+        ? "glow_contrast"
+        : family === "saturated_asset_family"
+          ? "saturated_asset_family"
+          : "default_safe_color",
+    reason: selected.reasons.length > 0 ? selected.reasons.join("; ") : "highest-scoring safe matte after prompt avoidance",
+    family,
+    candidates: scored,
+    retry_candidates: scored.slice(1).map((candidate) => candidate.matte_color),
+  };
+}
+
+function resolveLegacyTransparentMatteSelection(
+  prompt: string,
+  profile: TransparentProfile,
+  requestedMatteColor?: string | null,
+): LegacyMatteSelection {
+  const manual = parseMatteColorOrAuto(requestedMatteColor);
+  if (manual) {
+    const matteColor = colorToHex(manual);
+    return {
+      matte_color: matteColor,
+      matte_color_source: "manual",
+      rule_bucket: "manual_override",
+      reason: "manual override",
+      family: classifyMatteFamily(profile),
+      candidates: [
+        {
+          matte_color: matteColor,
+          score: 1,
+          reasons: ["manual override"],
+        },
+      ],
+      retry_candidates: [],
+    };
+  }
+  return chooseLegacyMatteColor(prompt, profile);
 }
 
 export function extractChromaFile(
@@ -457,6 +613,287 @@ function normalizeMaterial(material?: string | null): TransparentMaterial | null
   return known.includes(value as TransparentMaterial) ? (value as TransparentMaterial) : null;
 }
 
+function mattePalette() {
+  return [
+    {
+      name: "magenta" as const,
+      color: "#ff00ff",
+      baseScore: {
+        unknown: 10,
+        icon: 0,
+        product: 0,
+        sticker: 0,
+        seal: 2,
+        translucent: 18,
+        glow: 16,
+        shadow: 12,
+        effect: 12,
+      },
+      familyReasons: {
+        unknown: "default saturated matte",
+        icon: "saturated matte for compact assets",
+        product: "saturated matte for hard-edged cutouts",
+        sticker: "saturated matte for sticker-like assets",
+        seal: "saturated matte with strong contrast",
+        translucent: "fallback saturated matte",
+        glow: "fallback saturated matte",
+        shadow: "fallback saturated matte",
+        effect: "fallback saturated matte",
+      },
+    },
+    {
+      name: "cyan" as const,
+      color: "#00ffff",
+      baseScore: {
+        unknown: 12,
+        icon: 2,
+        product: 2,
+        sticker: 2,
+        seal: 4,
+        translucent: 16,
+        glow: 18,
+        shadow: 14,
+        effect: 14,
+      },
+      familyReasons: {
+        unknown: "default saturated matte",
+        icon: "saturated matte for compact assets",
+        product: "saturated matte for hard-edged cutouts",
+        sticker: "saturated matte for sticker-like assets",
+        seal: "saturated matte with strong contrast",
+        translucent: "fallback saturated matte",
+        glow: "fallback saturated matte",
+        shadow: "fallback saturated matte",
+        effect: "fallback saturated matte",
+      },
+    },
+    {
+      name: "blue" as const,
+      color: "#0000ff",
+      baseScore: {
+        unknown: 14,
+        icon: 4,
+        product: 4,
+        sticker: 4,
+        seal: 6,
+        translucent: 20,
+        glow: 20,
+        shadow: 16,
+        effect: 16,
+      },
+      familyReasons: {
+        unknown: "default saturated matte",
+        icon: "saturated matte for compact assets",
+        product: "saturated matte for hard-edged cutouts",
+        sticker: "saturated matte for sticker-like assets",
+        seal: "saturated matte with strong contrast",
+        translucent: "fallback saturated matte",
+        glow: "fallback saturated matte",
+        shadow: "fallback saturated matte",
+        effect: "fallback saturated matte",
+      },
+    },
+    {
+      name: "green" as const,
+      color: "#00ff00",
+      baseScore: {
+        unknown: 16,
+        icon: 6,
+        product: 6,
+        sticker: 6,
+        seal: 8,
+        translucent: 22,
+        glow: 22,
+        shadow: 18,
+        effect: 18,
+      },
+      familyReasons: {
+        unknown: "legacy chroma matte fallback",
+        icon: "legacy chroma matte fallback",
+        product: "legacy chroma matte fallback",
+        sticker: "legacy chroma matte fallback",
+        seal: "legacy chroma matte fallback",
+        translucent: "legacy chroma matte fallback",
+        glow: "legacy chroma matte fallback",
+        shadow: "legacy chroma matte fallback",
+        effect: "legacy chroma matte fallback",
+      },
+    },
+    {
+      name: "black" as const,
+      color: "#000000",
+      baseScore: {
+        unknown: 0,
+        icon: 0,
+        product: 0,
+        sticker: 0,
+        seal: 0,
+        translucent: 0,
+        glow: 0,
+        shadow: 0,
+        effect: 0,
+      },
+      familyReasons: {
+        unknown: "preferred neutral matte",
+        icon: "preferred neutral matte",
+        product: "preferred neutral matte",
+        sticker: "preferred neutral matte",
+        seal: "preferred neutral matte",
+        translucent: "preferred neutral matte",
+        glow: "preferred neutral matte",
+        shadow: "preferred neutral matte",
+        effect: "preferred neutral matte",
+      },
+    },
+    {
+      name: "white" as const,
+      color: "#ffffff",
+      baseScore: {
+        unknown: 1,
+        icon: 1,
+        product: 1,
+        sticker: 1,
+        seal: 1,
+        translucent: 1,
+        glow: 1,
+        shadow: 1,
+        effect: 1,
+      },
+      familyReasons: {
+        unknown: "preferred neutral matte",
+        icon: "preferred neutral matte",
+        product: "preferred neutral matte",
+        sticker: "preferred neutral matte",
+        seal: "preferred neutral matte",
+        translucent: "preferred neutral matte",
+        glow: "preferred neutral matte",
+        shadow: "preferred neutral matte",
+        effect: "preferred neutral matte",
+      },
+    },
+  ] as const;
+}
+
+function preferredNeutralMatte(prompt: string): "black" | "white" | null {
+  if (hasAny(prompt, ["white", "snow", "milk", "ivory", "pearl", "paper", "chalk", "porcelain", "cloud", "light", "pale", "cream"])) {
+    return "black";
+  }
+  if (hasAny(prompt, ["black", "smoke", "shadow", "night", "dark", "charcoal", "ink", "obsidian", "raven", "midnight"])) {
+    return "white";
+  }
+  return "black";
+}
+
+function mattePaletteOrder(name: MatteColorName) {
+  return mattePalette().findIndex((candidate) => candidate.name === name);
+}
+
+function matteFamily(profile: TransparentProfile): keyof ReturnType<typeof mattePalette>[number]["baseScore"] {
+  return profile === "generic" ? "unknown" : profile;
+}
+
+function matteRuleBucket(name: MatteColorName, family: keyof ReturnType<typeof mattePalette>[number]["baseScore"], prompt: string) {
+  if (family === "translucent" || family === "glow" || family === "shadow") {
+    return name === "black" || name === "white" ? "contrast_family_bias" : "saturated_family_fallback";
+  }
+  if (family === "icon" || family === "product" || family === "sticker" || family === "seal" || family === "effect") {
+    return name === "black" || name === "white" ? "contrast_fallback" : "saturated_family_bias";
+  }
+  if (prompt.length === 0) return "unknown_prompt";
+  return "prompt_avoidance";
+}
+
+function colorAvoidanceRules(name: MatteColorName) {
+  switch (name) {
+    case "green":
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["green", "grass", "leaf", "leaves", "plant", "forest", "moss", "frog", "emerald", "jade", "olive"]),
+          penalty: 1000,
+          reason: "prompt already suggests green-toned subject matter",
+        },
+      ];
+    case "white":
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["white", "snow", "milk", "ivory", "pearl", "cloud", "paper", "plush", "cotton", "porcelain", "ceramic", "marble", "wedding"]),
+          penalty: 1000,
+          reason: "prompt already suggests white or pale subject matter",
+        },
+      ];
+    case "black":
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["black", "smoke", "shadow", "silhouette", "night", "charcoal", "obsidian", "raven", "goth", "dark"]),
+          penalty: 1000,
+          reason: "prompt already suggests black or very dark subject matter",
+        },
+      ];
+    case "blue":
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["blue", "sky", "ocean", "water", "ice", "sapphire", "denim", "teal"]),
+          penalty: 1000,
+          reason: "prompt already suggests blue-toned subject matter",
+        },
+      ];
+    case "cyan":
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["cyan", "aqua", "teal", "turquoise", "water", "ice", "ocean", "glacier"]),
+          penalty: 1000,
+          reason: "prompt already suggests cyan or aqua subject matter",
+        },
+      ];
+    case "magenta":
+    default:
+      return [
+        {
+          matches: (text: string) =>
+            hasAny(text, ["magenta", "pink", "purple", "fuchsia", "rose", "lavender", "coral", "orchid", "plum"]),
+          penalty: 1000,
+          reason: "prompt already suggests magenta or pink subject matter",
+        },
+      ];
+  }
+}
+
+function hasAny(text: string, terms: string[]) {
+  return terms.some((term) => {
+    if (term.includes(" ")) return text.includes(term);
+    return new RegExp(`\\b${escapeRegExp(term)}\\b`, "i").test(text);
+  });
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matteColorNameForRgb(rgb: readonly [number, number, number]): MatteColorName | null {
+  const hex = colorToHex(rgb);
+  switch (hex) {
+    case "#ff00ff":
+      return "magenta";
+    case "#00ffff":
+      return "cyan";
+    case "#0000ff":
+      return "blue";
+    case "#00ff00":
+      return "green";
+    case "#000000":
+      return "black";
+    case "#ffffff":
+      return "white";
+    default:
+      return null;
+  }
+}
+
 function chromaPreset(material: TransparentMaterial | null): ChromaSettings {
   switch (material) {
     case "soft-3d":
@@ -478,6 +915,124 @@ function chromaPreset(material: TransparentMaterial | null): ChromaSettings {
       };
   }
 }
+
+const MATTE_PALETTE = ["magenta", "cyan", "blue", "green", "black", "white"] as const;
+type MattePaletteColor = (typeof MATTE_PALETTE)[number];
+
+function classifyMatteFamily(profile: TransparentProfile): LegacyMatteSelection["family"] {
+  switch (profile) {
+    case "glow":
+    case "shadow":
+    case "translucent":
+    case "effect":
+      return "glow";
+    case "icon":
+    case "product":
+    case "sticker":
+    case "seal":
+      return "saturated_asset_family";
+    default:
+      return "default_safe_color";
+  }
+}
+
+function scoreMatteCandidate(
+  matteColor: MattePaletteColor,
+  family: MatteSelection["family"],
+  prompt: string,
+  index: number,
+) {
+  const reasons: string[] = [];
+  let score = familyBaseScore(family, matteColor);
+  score -= index * 0.01;
+
+  const matchedAvoidances = keywordGroups[matteColor].filter((keyword) => containsWord(prompt, keyword));
+  if (matchedAvoidances.length > 0) {
+    score -= 1000;
+    reasons.push(`prompt mentions ${matchedAvoidances[0]}`);
+  }
+
+  const supportiveMatches = familySupportKeywords[family].filter((keyword) => containsWord(prompt, keyword));
+  if (supportiveMatches.length > 0) {
+    score += 4;
+    reasons.push(`profile family fits ${supportiveMatches[0]}`);
+  }
+
+  if (reasons.length === 0) {
+    reasons.push(familyReason(family));
+  } else if (matchedAvoidances.length > 0) {
+    reasons.push("avoided due to subject color overlap");
+  }
+  return { score, reasons };
+}
+
+function familyBaseScore(family: MatteSelection["family"], matteColor: MattePaletteColor) {
+  switch (family) {
+    case "glow":
+      return glowPreferenceScores[matteColor];
+    case "saturated_asset_family":
+      return saturatedPreferenceScores[matteColor];
+    default:
+      return defaultPreferenceScores[matteColor];
+  }
+}
+
+function familyReason(family: MatteSelection["family"]) {
+  switch (family) {
+    case "glow":
+      return "glow-like asset prefers black/white contrast or a saturated fallback";
+    case "saturated_asset_family":
+      return "icon/product family prefers a saturated matte";
+    default:
+      return "unknown asset uses the highest-confidence safe matte after prompt avoidance";
+  }
+}
+
+function containsWord(prompt: string, term: string) {
+  return prompt.includes(term) || prompt.split(/[^a-z0-9#]+/i).includes(term);
+}
+
+const keywordGroups: Record<MattePaletteColor, string[]> = {
+  magenta: ["magenta", "pink", "fuchsia", "rose", "purple", "violet", "lavender", "orchid"],
+  cyan: ["cyan", "aqua", "turquoise", "teal", "ice", "water"],
+  blue: ["blue", "sky", "ocean", "navy", "denim", "sapphire", "cerulean"],
+  green: ["green", "leaf", "leaves", "grass", "frog", "emerald", "plant", "foliage", "forest", "ivy", "moss", "lime", "cactus"],
+  black: ["black", "smoke", "silhouette", "shadow", "night", "coal", "ink", "raven", "charcoal", "obsidian", "dark", "midnight"],
+  white: ["white", "snow", "milk", "cream", "ivory", "porcelain", "pearl", "cloud", "foam", "paper", "ghost", "marshmallow", "cotton", "chalk", "bone", "polar bear"],
+};
+
+const familySupportKeywords: Record<MatteSelection["family"], string[]> = {
+  glow: ["glow", "flame", "smoke", "mist", "particle", "shadow", "translucent", "glass", "liquid", "crystal"],
+  saturated_asset_family: ["icon", "product", "sticker", "seal", "toy", "figurine"],
+  default_safe_color: ["asset", "object", "subject"],
+};
+
+const glowPreferenceScores: Record<MattePaletteColor, number> = {
+  black: 100,
+  white: 96,
+  blue: 88,
+  cyan: 86,
+  magenta: 84,
+  green: 82,
+};
+
+const saturatedPreferenceScores: Record<MattePaletteColor, number> = {
+  magenta: 100,
+  cyan: 98,
+  blue: 96,
+  green: 94,
+  black: 82,
+  white: 80,
+};
+
+const defaultPreferenceScores: Record<MattePaletteColor, number> = {
+  magenta: 98,
+  cyan: 96,
+  blue: 94,
+  green: 92,
+  black: 90,
+  white: 88,
+};
 
 function extractChroma(
   image: LoadedImage,

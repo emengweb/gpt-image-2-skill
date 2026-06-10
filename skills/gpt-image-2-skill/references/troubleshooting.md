@@ -127,6 +127,8 @@ Checks:
 
 - `gpt-image-2-skill --json background doctor`
 - `gpt-image-2-skill --json background init`
+- `gpt-image-2-skill --json background doctor --fix`
+- `gpt-image-2-skill --json background init --install`
 
 Typical fixes:
 
@@ -138,6 +140,7 @@ Notes:
 
 - `rembg` is optional for the fast built-in method, but `Pillow` is still required
 - `numpy` is optional; the built-in fallback works without it, but may be slower
+- Python packages are only auto-installed on explicit request through `--fix` or `--install`
 
 ## Moderation refusals (OpenAI)
 

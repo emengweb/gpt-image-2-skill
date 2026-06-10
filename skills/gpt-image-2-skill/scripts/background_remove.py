@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 JSON_ONLY = False
+TRANSPARENT_ALPHA_MAX = 5
 
 
 def log(message: str, *, error: bool = False):
@@ -71,6 +72,34 @@ BG_REMOVAL_METHODS = {
 }
 
 
+def scrub_transparent_pixels(image):
+    """Zero RGB channels for fully transparent pixels to avoid halo artifacts."""
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+
+    try:
+        import numpy as np
+        from PIL import Image
+
+        data = np.array(image)
+        transparent_mask = data[:, :, 3] <= TRANSPARENT_ALPHA_MAX
+        if transparent_mask.any():
+            data[transparent_mask, 0] = 0
+            data[transparent_mask, 1] = 0
+            data[transparent_mask, 2] = 0
+            data[transparent_mask, 3] = 0
+        return Image.fromarray(data, "RGBA")
+    except ImportError:
+        pixels = image.load()
+        width, height = image.size
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = pixels[x, y]
+                if a <= TRANSPARENT_ALPHA_MAX:
+                    pixels[x, y] = (0, 0, 0, 0)
+        return image
+
+
 def remove_background_rembg(image_path: str, output_path: str = None) -> dict:
     """Remove background using rembg (AI-based, runs locally)."""
     try:
@@ -90,6 +119,7 @@ def remove_background_rembg(image_path: str, output_path: str = None) -> dict:
         input_img = Image.open(image_path)
         log("Removing background with rembg (AI model)...")
         output_img = remove(input_img)
+        output_img = scrub_transparent_pixels(output_img)
 
         output_dir = Path(output_path).parent
         if output_dir and str(output_dir) != "." and not output_dir.exists():
@@ -146,6 +176,9 @@ def remove_background_builtin(image_path: str, output_path: str = None) -> dict:
                 (brightness > 240)
             )
 
+            data[:, :, 0] = np.where(mask, 0, r)
+            data[:, :, 1] = np.where(mask, 0, g)
+            data[:, :, 2] = np.where(mask, 0, b)
             data[:, :, 3] = np.where(mask, 0, a)
             img = Image.fromarray(data)
 
@@ -161,7 +194,9 @@ def remove_background_builtin(image_path: str, output_path: str = None) -> dict:
                     saturation = (max_rgb - min_rgb) / max_rgb if max_rgb > 0 else 0
 
                     if (saturation < 0.30 and brightness > 100) or brightness > 240:
-                        pixels[x, y] = (r, g, b, 0)
+                        pixels[x, y] = (0, 0, 0, 0)
+
+        img = scrub_transparent_pixels(img)
 
         output_dir = Path(output_path).parent
         if output_dir and str(output_dir) != "." and not output_dir.exists():

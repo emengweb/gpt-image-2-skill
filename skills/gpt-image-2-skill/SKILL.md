@@ -58,20 +58,18 @@ $SKILL_CMD --json \
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \
   --method auto --matte-color auto --strict
 
-# 6. Run standalone background-removal environment checks, optional dependency install, or direct cutouts
-$SKILL_CMD --json background doctor
-$SKILL_CMD --json background doctor --fix
-$SKILL_CMD --json background init
-$SKILL_CMD --json background init --install
-$SKILL_CMD --json background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.png
+# 6. Run standalone background-removal environment checks or direct cutouts
+$SKILL_CMD --json \\
+  transparent extract --input /tmp/source-green.png --out /tmp/asset.png \\
+  --method auto --matte-color auto --strict
 
 # 7. Verify the final file before delivery
-$SKILL_CMD --json \
+$SKILL_CMD --json \\
   transparent verify --input /tmp/asset.png --profile icon --strict
 
 # 8. Raw request escape hatch
-$SKILL_CMD --json \
-  request create --request-operation generate \
+$SKILL_CMD --json \\
+  request create --request-operation generate \\
   --body-file /tmp/body.json --out-image /tmp/out.png --expect-image
 
 # 9. Optional smoke check
@@ -93,14 +91,13 @@ $SKILL_CMD --json doctor
 
 If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
 
-For standalone cutout workflows, run `background doctor` or `background init` first. They validate Python, the merged `background_remove.py` script, and optional packages such as `rembg`, `Pillow`, and `numpy`. Dependency installation is explicit only: `background init --install` or `background doctor --fix`.
+For standalone cutout workflows, use `transparent extract` first. It works on a single source image and performs local background removal plus transparent verification. If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
 
 Background-removal prerequisites and behavior:
 
-- `rembg` is the recommended AI method for arbitrary photos, products, hair, fur, and irregular edges.
-- `Pillow` is required for all standalone background-removal flows, including the built-in fallback.
-- `numpy` is optional; it speeds up the built-in method but is not required.
-- The first successful `rembg` run may download the U2-Net model (roughly 170 MB) and cache it locally.
+- `transparent extract --method auto` is the default cutout path.
+- `Pillow` is required for local extraction helpers.
+- `numpy` is optional; it can speed up the built-in extraction path but is not required.
 
 Typical installs:
 
@@ -162,62 +159,56 @@ The prompt is for "what is in the picture"; background, size, format, count, and
 For transparent output, do not rely on provider-native transparency. Use the `transparent` command group as the Agent-facing tool layer:
 
 - `transparent generate` — prompt-to-final PNG. It generates a controlled matte source, tries the integrated `background-remove` pipeline first, falls back to local chroma extraction when needed, verifies the result, and only succeeds when the final PNG passes transparency checks.
-- `transparent extract` — local background removal with an integrated `background-remove` first pass and built-in chroma/dual fallback. Use it for generated matte sources first, but it can also attempt arbitrary-photo cutouts before falling back.
+- `transparent extract` — direct cutout for an existing source image. Use `--method auto` by default; the runtime picks the best available local extraction path and verifies the PNG before returning success.
 - `transparent verify` — final gate for any PNG before delivery. Use `--strict` and the right `--profile` when the file must be accepted or fail the task.
-- `background doctor` — merged environment check for direct background removal. It reports Python/script readiness, dependency status, and install hints. Add `--fix` to explicitly install missing Python packages.
-- `background init` — merged initialization helper. It tells you whether the local environment is already ready and what to install otherwise. Add `--install` to explicitly install missing Python packages.
-- `background remove` — direct single-image or batch cutout command. It preserves the original `background-remove` skill use cases under the unified CLI.
 
 `transparent generate` now also reports `final_background_intent`, `selected_matte_color`, and `intermediate_extraction_background` in JSON so the agent can see the deterministic matte choice and retry candidates used internally.
 
-## Standalone background removal
+## Direct cutout workflow
 
-Use the `background` command group when the user wants direct cutouts rather than a generated transparent asset pipeline.
+Use `transparent extract` when the user wants to remove the background from an existing image.
 
 Recommended direct-cutout workflow:
 
 1. Confirm the source image or list of source images.
-2. Prefer `background remove --method rembg` for photos, products, portraits, hair, fur, or mixed backgrounds.
-3. Prefer `background remove --method builtin` for icons, logos, screenshots, and graphics with mostly white or light neutral backgrounds.
-4. If the user does not specify an output path, keep the default `_nobg` suffix behavior in the same directory.
-5. Deliver PNG by default unless the user explicitly wants WebP or a custom output path with `.webp`.
+2. Use `transparent extract --method auto` for the first pass.
+3. If the result is unsatisfactory on a simple flat-matte source, retry with `--method chroma` and explicit extraction tuning.
+4. If the task needs dual black/white extraction for translucent assets, use `--method dual` with `--dark-image` and `--light-image`.
+5. If the user does not specify an output path, save beside the source with an `_nobg` suffix.
+6. Deliver PNG by default unless the user explicitly wants a different format.
 
 Direct-cutout quick examples:
 
 ```bash
-# Single image, default AI method, custom PNG output
+# Single image, default cutout path
 $SKILL_CMD --json \
-  background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.png
+  transparent extract --input /tmp/photo.jpg --out /tmp/photo_nobg.png \
+  --method auto --profile generic
 
-# Single image, built-in fast method for white-background graphics
+# Force chroma extraction for flat-matte graphics
 $SKILL_CMD --json \
-  background remove --input /tmp/icon.png --method builtin
+  transparent extract --input /tmp/icon.png --out /tmp/icon_nobg.png \
+  --method chroma --profile icon --strict
 
-# Batch processing into an output directory
+# Dual extraction for translucent assets
 $SKILL_CMD --json \
-  background remove --input /tmp/a.jpg /tmp/b.png /tmp/c.webp \
-  --output /tmp/transparent_batch
-
-# WebP output by extension
-$SKILL_CMD --json \
-  background remove --input /tmp/photo.jpg --output /tmp/photo_nobg.webp
+  transparent extract --dark-image /tmp/glass-black.png --light-image /tmp/glass-white.png \
+  --out /tmp/glass_nobg.png --method dual --profile translucent --strict
 ```
 
 Direct-cutout method guidance:
 
 | Method | Best for | Notes |
 |---|---|---|
-| `rembg` | photos, products, portraits, complex edges, arbitrary backgrounds | default direct-cutout method; uses the merged `background-remove` AI pipeline |
-| `builtin` | icons, logos, screenshots, graphics with clean white backgrounds | faster, simpler, may produce artifacts on complex photos |
+| `auto` | first-pass cutouts for most images | lets the runtime choose the best available local extraction path |
+| `chroma` | icons, logos, screenshots, graphics with clean flat backgrounds | faster and deterministic on simple matte backgrounds |
+| `dual` | translucent or glow-heavy assets | requires matching black/white source renders |
 
-Standalone background-removal output behavior:
+Standalone cutout output behavior:
 
-- One input + no `--output`: save beside the source with `_nobg` suffix and `.png`
-- Multiple inputs + `--output <dir>`: save each result into that directory with `_nobg.png`
-- Output format follows the output extension: `.png` or `.webp`
-- PNG is the safest default for final transparent deliverables
-
-A transparent deliverable is valid only if the final file has a real PNG alpha channel and passes verification. A visual appearance of transparency, a white background, or a checkerboard pattern is not sufficient.
+- Save to the explicit `--out` path you provide.
+- PNG is the safest default for final transparent deliverables.
+- A transparent deliverable is valid only if the final file has a real PNG alpha channel and passes verification.
 
 `--strict` is profile-based:
 
@@ -290,15 +281,14 @@ For `transparent generate` and `transparent extract`, also inspect `selected_str
 - `chroma` — force built-in chroma only
 - `dual` — force black/white dual-background extraction
 
-For direct cutout tasks, prefer `background remove` over `transparent extract` unless you explicitly need controlled matte extraction or transparent-verification profiles.
+For direct cutout tasks, prefer `transparent extract` over any legacy `background` examples unless you explicitly need a different local extraction strategy.
 
 Direct-cutout error handling and retries:
 
-- If `rembg` is unavailable, install it or intentionally switch to `--method builtin`
-- If the built-in method leaves artifacts on a photo, retry with `--method rembg`
-- If an image is missing or corrupt, fix the input path before retrying
-- For large batches, expect partial failures to surface in structured JSON; inspect per-item `results`
-- For arbitrary-photo cutouts where edge quality matters, prefer `background remove` first, then use `transparent verify` only if the task truly requires transparent PNG acceptance gating
+- If `auto` leaves artifacts on a flat-matte image, retry with `--method chroma`.
+- If the subject is translucent or glow-heavy, retry with `--method dual` using paired black/white renders.
+- If an image is missing or corrupt, fix the input path before retrying.
+- For arbitrary-photo cutouts where edge quality matters, inspect `warnings`, `matte_residue_score`, and `quality_score` before delivery.
 
 ## Notes
 

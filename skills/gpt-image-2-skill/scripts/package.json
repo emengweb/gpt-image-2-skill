@@ -9,7 +9,7 @@
     "url": "https://github.com/emengweb/gpt-image-2-skill.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "type": "module",
   "bin": {

@@ -82,10 +82,10 @@ A complete Codex `images generate` typically produces ~20 events (1 local + ~5 p
 
 ## Consumption pattern
 
-For an agent watching live progress while still parsing the final result:
+For an agent watching live progress while still parsing the final result (resolve the launcher from the skill's own `scripts/` directory as shown in `SKILL.md`):
 
 ```bash
-gpt-image-2-skill --json --json-events images generate \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events images generate \
   --prompt "..." --out /tmp/out.png \
   > result.json \
   2> events.jsonl

@@ -1,42 +1,68 @@
 # Troubleshooting
 
-Decision tree for the most common failures. Always run `--json doctor` first to confirm runtime, provider auth, and retry policy in one shot.
+Decision tree for the most common failures.
 
-For direct cutout issues, also run `--json background doctor` or `--json background init` to confirm the merged background-removal runtime is available.
+Let `{skill_root}` mean the absolute directory containing this skill's `SKILL.md`. Resolve `SKILL_DIR` once and always invoke the bundled launcher by absolute path; never use a globally installed CLI:
 
-## `gpt-image-2-skill: command not found`
+```bash
+SKILL_DIR="{skill_root}"
 
-The TypeScript CLI is not installed or is missing from `PATH`.
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
+```
+
+For direct cutout issues, also run `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background doctor` or `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background init` to confirm the merged background-removal runtime is available.
+
+## Bundled runtime cannot start
+
+The launcher at `{skill_root}/scripts/gpt_image_2_skill.cjs` is missing, incomplete, or its local dependencies are absent. The skill only runs this bundled launcher; it never falls back to a PATH or globally installed CLI.
+
+Typical messages:
+
+- `Bundled runtime dependencies are missing: pngjs, jpeg-js.`
+- `Cannot find module 'pngjs'` (older copies of the launcher)
+- `The bundled TypeScript runtime requires Node.js >= 22.18 ...`
 
 Fixes:
 
-- `npm install --global gpt-image-2-skill`
-- or run the repo-local launcher directly:
+- Initialize this skill copy's dependencies once (nothing is installed globally):
 
 ```bash
-node skills/gpt-image-2-skill/scripts/gpt_image_2_skill.cjs --json doctor
+npm install --omit=dev --no-audit --no-fund --prefix "{skill_root}/scripts"
 ```
+
+- Verify the runtime starts, then retry the original command:
+
+```bash
+node "{skill_root}/scripts/gpt_image_2_skill.cjs" --version
+node "{skill_root}/scripts/gpt_image_2_skill.cjs" --json doctor
+```
+
+- If the message names a Node.js version, upgrade Node.js: the bundled TypeScript runtime requires Node.js >= 22.18 (the package `engines` field matches this requirement).
+- If the launcher file itself is missing, reinstall or update the skill copy instead of installing a global CLI:
+
+```bash
+npx skills add https://github.com/emengweb/gpt-image-2-skill --skill gpt-image-2-skill --copy
+```
+
+The standalone npm CLI (the `gpt-image-2-skill` package installed globally) is a separate product for shell and automation users; the skill does not use it.
 
 ## Documented command is missing
 
-If a command from the skill docs fails with `unrecognized subcommand`, treat it as a stale CLI runtime first.
+If a command from the skill docs fails with `unrecognized subcommand`, treat it as a stale bundled runtime first.
 
-Check upstream and local runtime versions:
+Check the bundled runtime version and the upstream release:
 
 ```bash
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version
 npm view gpt-image-2-skill version
-command -v gpt-image-2-skill || true
-gpt-image-2-skill --version || true
-node scripts/gpt_image_2_skill.cjs --version
 ```
 
-If the shell CLI is missing or stale, update it:
+If the bundled runtime is older than this document, update the skill copy itself (re-run the `npx skills add ... --copy` command above) rather than installing a global CLI, then re-check:
 
 ```bash
-npm install -g gpt-image-2-skill@latest
-command -v gpt-image-2-skill
-gpt-image-2-skill --version
-node scripts/selftest.cjs
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
+node "$SKILL_DIR/scripts/selftest.cjs"
 ```
 
 ## `auth_missing`
@@ -132,10 +158,10 @@ The merged standalone background-removal workflow depends on local Python packag
 
 Checks:
 
-- `gpt-image-2-skill --json background doctor`
-- `gpt-image-2-skill --json background init`
-- `gpt-image-2-skill --json background doctor --fix`
-- `gpt-image-2-skill --json background init --install`
+- `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background doctor`
+- `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background init`
+- `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background doctor --fix`
+- `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json background init --install`
 
 Typical fixes:
 
@@ -163,7 +189,7 @@ OpenAI may reject prompts. The runtime surfaces the upstream error verbatim unde
 Run the bundled self-test as a smoke check:
 
 ```bash
-node scripts/selftest.cjs
+node "{skill_root}/scripts/selftest.cjs"
 ```
 
 It calls `--json doctor` and `--json auth inspect`, then prints a one-line summary including which providers are ready.

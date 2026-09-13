@@ -41,6 +41,8 @@ npm install --global gpt-image-2-skill
 just install-local
 ```
 
+以上安装的是**独立 CLI**，供命令行、脚本与自动化直接调用，与 Skill 是两条互不依赖的路径（Skill 使用自身打包的启动器，见下文）。
+
 ## 快速开始
 
 OpenAI API Key 直连：
@@ -144,7 +146,20 @@ gpt-image-2-skill --json background remove --input ./a.png ./b.png --output ./ou
 npx skills add https://github.com/emengweb/gpt-image-2-skill --skill gpt-image-2-skill
 ```
 
-Skill 推荐优先使用已安装的全局 `gpt-image-2-skill` CLI。若全局 CLI 不存在，可直接安装 npm 包；仓库内调试时也可以直接运行 `node skills/gpt-image-2-skill/scripts/gpt_image_2_skill.cjs`。
+Skill 自带运行时，始终调用随技能安装的启动器：不依赖当前工作目录，也不使用 PATH 上的全局 CLI。
+
+```bash
+SKILL_DIR="/path/to/installed/gpt-image-2-skill"   # 包含 SKILL.md 的绝对目录
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
+```
+
+若启动器提示 `Bundled runtime dependencies are missing: ...`，只需对该技能副本执行一次局部初始化（不会安装任何全局内容）：
+
+```bash
+npm install --omit=dev --no-audit --no-fund --prefix "$SKILL_DIR/scripts"
+```
+
+仓库内调试时同样直接运行 `node skills/gpt-image-2-skill/scripts/gpt_image_2_skill.cjs`（启动器按自身文件位置解析运行时，任意 cwd 均可用）。
 
 ## 本地开发
 
@@ -171,11 +186,13 @@ just dev-frontend
 
 Pure TypeScript GPT Image 2 CLI, Skill, and web UI. The repository no longer ships Rust/Tauri runtime code; the shared runtime lives under `skills/gpt-image-2-skill/scripts` and is published directly as the `gpt-image-2-skill` npm package.
 
-Install:
+Install the standalone CLI (shell and automation use):
 
 ```bash
 npm install --global gpt-image-2-skill
 ```
+
+The skill is separate: it always runs its own bundled launcher at `<skill_dir>/scripts/gpt_image_2_skill.cjs` (where `<skill_dir>` contains `SKILL.md`), never a PATH or globally installed CLI. If the launcher reports `Bundled runtime dependencies are missing: ...`, initialize that skill copy once with `npm install --omit=dev --no-audit --no-fund --prefix "<skill_dir>/scripts"`.
 
 Useful local commands:
 

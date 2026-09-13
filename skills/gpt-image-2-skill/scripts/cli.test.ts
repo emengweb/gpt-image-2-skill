@@ -3776,3 +3776,191 @@ test("runCodexRequestCreate passes through response.in_progress, response.output
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 内置运行时契约：技能始终调用随技能打包的启动器，不依赖 cwd、不使用 PATH 上的全局 CLI。
+// ---------------------------------------------------------------------------
+
+const skillRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+function runBundledLauncher(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; nodeArgs?: string[] } = {},
+) {
+  return childProcess.spawnSync(
+    process.execPath,
+    [...(options.nodeArgs ?? []), cliBinPath(), ...args],
+    {
+      encoding: "utf8",
+      cwd: options.cwd ?? process.cwd(),
+      env: { ...process.env, ...(options.env ?? {}) },
+    },
+  );
+}
+
+function writeStalePathCli(binDir: string, markerFile: string) {
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(binDir, "gpt-image-2-skill"),
+    `#!/bin/sh\nprintf 'stale path cli invoked' > ${JSON.stringify(markerFile)}\nprintf '{"ok":true,"command":"stale-path-cli"}\\n'\n`,
+    { mode: 0o755 },
+  );
+}
+
+test("bundled launcher resolves its runtime from the skill directory, not the working directory", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const foreignCwd = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-cwd-"));
+  try {
+    const result = runBundledLauncher(["--json", "doctor"], {
+      cwd: foreignCwd,
+      env: { CODEX_HOME: sandbox.codexHome },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.command, "doctor");
+    assert.equal(payload.provider_selection.resolved, "mock");
+    assert.equal(payload.model_routing.generate, "gpt-image-2.5-flare");
+    assert.equal(payload.model_routing.edit, "gpt-image-2.5-sunburst");
+    assert.deepEqual(payload.model_routing.resolution_order, [
+      "--model",
+      "--tier",
+      "provider_config_model",
+      "operation_default",
+    ]);
+  } finally {
+    removeCliSandbox(sandbox);
+    fs.rmSync(foreignCwd, { recursive: true, force: true });
+  }
+});
+
+test("bundled launcher ignores a stale PATH CLI and routes generate/edit through the bundled runtime", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const foreignCwd = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-path-"));
+  const markerFile = path.join(foreignCwd, "stale-cli-called");
+  const generateOut = path.join(foreignCwd, "generate.png");
+  const editOut = path.join(foreignCwd, "edit.png");
+  try {
+    const binDir = path.join(foreignCwd, "bin");
+    writeStalePathCli(binDir, markerFile);
+    const env = {
+      CODEX_HOME: sandbox.codexHome,
+      TEST_CAPTURE_FILE: sandbox.captureFile,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    };
+
+    const generate = runBundledLauncher(
+      ["--json", "images", "generate", "--prompt", "apple", "--out", generateOut],
+      { cwd: foreignCwd, env, nodeArgs: ["--require", sandbox.fetchStubPath] },
+    );
+    assert.equal(generate.status, 0, generate.stderr);
+    const generatePayload = JSON.parse(generate.stdout);
+    assert.equal(generatePayload.model_resolution.resolved_model, "gpt-image-2.5-flare");
+    assert.equal(
+      JSON.parse(fs.readFileSync(sandbox.captureFile, "utf8")).body.model,
+      "gpt-image-2.5-flare",
+    );
+    assert.ok(fs.statSync(generateOut).size > 0);
+
+    const edit = runBundledLauncher(
+      [
+        "--json",
+        "images",
+        "edit",
+        "--prompt",
+        "white background",
+        "--ref-image",
+        sandbox.refImagePath,
+        "--out",
+        editOut,
+      ],
+      { cwd: foreignCwd, env, nodeArgs: ["--require", sandbox.fetchStubPath] },
+    );
+    assert.equal(edit.status, 0, edit.stderr);
+    const editPayload = JSON.parse(edit.stdout);
+    assert.equal(editPayload.model_resolution.resolved_model, "gpt-image-2.5-sunburst");
+    assert.equal(
+      JSON.parse(fs.readFileSync(sandbox.captureFile, "utf8")).body.model,
+      "gpt-image-2.5-sunburst",
+    );
+    assert.ok(fs.statSync(editOut).size > 0);
+
+    assert.equal(fs.existsSync(markerFile), false, "PATH 上的旧 CLI 不应被调用");
+  } finally {
+    removeCliSandbox(sandbox);
+    fs.rmSync(foreignCwd, { recursive: true, force: true });
+  }
+});
+
+test("bundled launcher fails with the local dependency init command instead of falling back to a PATH CLI", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-nodeps-"));
+  const scriptsCopy = path.join(tempDir, "scripts");
+  const markerFile = path.join(tempDir, "stale-cli-called");
+  try {
+    fs.cpSync(path.dirname(cliBinPath()), scriptsCopy, {
+      recursive: true,
+      filter: (source) => !source.split(path.sep).includes("node_modules"),
+    });
+    assert.equal(fs.existsSync(path.join(scriptsCopy, "node_modules")), false);
+    const binDir = path.join(tempDir, "bin");
+    writeStalePathCli(binDir, markerFile);
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [path.join(scriptsCopy, "gpt_image_2_skill.cjs"), "--json", "doctor"],
+      {
+        encoding: "utf8",
+        cwd: tempDir,
+        env: {
+          ...process.env,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /pngjs/);
+    assert.match(result.stderr, /npm install --omit=dev/);
+    assert.ok(
+      result.stderr.includes(fs.realpathSync(scriptsCopy)),
+      `错误信息应包含局部初始化路径：${result.stderr}`,
+    );
+    assert.equal(fs.existsSync(markerFile), false, "缺失依赖时不应回退调用 PATH 上的 CLI");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("skill docs pin agent execution to the bundled launcher and never the global CLI", () => {
+  const readSkillFile = (relativePath: string) =>
+    fs.readFileSync(path.join(skillRoot, relativePath), "utf8");
+
+  const skillMd = readSkillFile("SKILL.md");
+  assert.match(skillMd, /\{skill_root\}/);
+  assert.match(skillMd, /node "\$SKILL_DIR\/scripts\/gpt_image_2_skill\.cjs"/);
+  assert.match(skillMd, /npm install --omit=dev[^\n]*--prefix/);
+  assert.doesNotMatch(skillMd, /npm install --global gpt-image-2-skill/);
+  assert.doesNotMatch(skillMd, /command -v gpt-image-2-skill/);
+  assert.doesNotMatch(skillMd, /SKILL_CMD/);
+  assert.doesNotMatch(skillMd, /(^|\n)node scripts\//);
+
+  const referenceFiles = fs
+    .readdirSync(path.join(skillRoot, "references"))
+    .filter((name) => name.endsWith(".md"));
+  assert.ok(referenceFiles.length >= 6, "references 目录应包含全部参考文档");
+  for (const name of referenceFiles) {
+    const relativePath = path.join("references", name);
+    const text = readSkillFile(relativePath);
+    assert.doesNotMatch(text, /npm install --global gpt-image-2-skill/, relativePath);
+    assert.doesNotMatch(text, /command -v gpt-image-2-skill/, relativePath);
+    assert.doesNotMatch(text, /SKILL_CMD/, relativePath);
+    assert.doesNotMatch(text, /(^|\n)node scripts\//, relativePath);
+  }
+
+  const evals = readSkillFile("evals/evals.json");
+  assert.doesNotMatch(evals, /node scripts\/gpt_image_2_skill\.cjs/);
+  assert.match(evals, /\{skill_root\}\/scripts\/gpt_image_2_skill\.cjs/);
+
+  const agentGuide = readSkillFile("agents/openai.yaml");
+  assert.match(agentGuide, /gpt_image_2_skill\.cjs/);
+  assert.doesNotMatch(agentGuide, /command -v gpt-image-2-skill/);
+});

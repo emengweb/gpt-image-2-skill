@@ -2,6 +2,12 @@
 
 Use this reference when the user asks for a final transparent-background PNG. The CLI is a tool layer; the Agent is responsible for choosing prompts, backgrounds, and retry strategy.
 
+Resolve the bundled runtime once (see `SKILL.md`); `{skill_root}` is the absolute directory containing that file:
+
+```bash
+SKILL_DIR="{skill_root}"
+```
+
 ## Command roles
 
 | Command | Role |
@@ -42,10 +48,10 @@ A transparent deliverable is valid only if the final file has a real PNG alpha c
 Examples:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent verify --input /tmp/sword.png --profile icon --strict
 
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent verify --input /tmp/stamp.png --profile seal --strict
 ```
 
@@ -74,7 +80,7 @@ Render on a perfectly flat pure magenta background. No shadows, gradients, textu
 对于提示词生成的最终透明图，使用 `transparent generate` 的原生透明请求。只有已有 RGB 图片或需要受控底图时，才使用 `transparent extract` 的 chroma/rembg 流程。
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   transparent generate \
   --prompt "a polished fantasy sword game asset, no text, no frame" \
   --out /tmp/sword.png --size 2K --quality high
@@ -83,7 +89,7 @@ node scripts/gpt_image_2_skill.cjs --json --json-events \
 If the object contains green, avoid green:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --method auto \
   --input /tmp/source-magenta.png --matte-color auto \
   --out /tmp/asset.png --strict
@@ -128,7 +134,7 @@ Use dual-background extraction. Generate or edit two aligned source images:
 Dual extraction requires the dark and light images to be geometrically identical or near-identical. Do not independently generate black-background and white-background variants unless the provider can preserve geometry. Prefer generating one source asset, then using reference-image editing or background replacement to create the paired background.
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --method dual \
   --dark-image /tmp/glass-black.png \
   --light-image /tmp/glass-white.png \
@@ -163,13 +169,13 @@ Decide if the shadow belongs to the asset.
 `transparent generate` is prompt-only. If you need a reference image to lock style, generate or edit a controlled matte source first, then extract:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   images edit \
   --ref-image /tmp/style-lock-rgb.png \
   --prompt "Use the reference only for material, palette, lighting, and proportions. Create a new centered asset on a flat magenta background. Do not preserve the reference subject. No text." \
   --out /tmp/source-magenta.png --format png --size 2K
 
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract \
   --input /tmp/source-magenta.png \
   --matte-color auto \
@@ -189,7 +195,7 @@ Do not rely on the image model for exact UI text, labels, scores, combo numbers,
 Always verify, and inspect the extraction path that actually won:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent verify --input /tmp/asset.png --profile icon --strict
 ```
 
@@ -221,7 +227,7 @@ Important fields:
 When verifying chroma output, pass the matte if known:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent verify \
   --input /tmp/asset.png \
   --expected-matte-color magenta \
@@ -260,7 +266,7 @@ Retry tree:
 Keep source files only while iterating:
 
 ```bash
-node scripts/gpt_image_2_skill.cjs --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   transparent generate \
   --prompt "..." --out /tmp/final.png \
   --report-dir /tmp/transparent-debug

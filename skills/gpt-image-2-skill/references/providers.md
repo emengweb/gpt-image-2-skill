@@ -71,11 +71,10 @@ Credential sources:
 The runtime sends `OpenAI/JS 4.96.0` by default. To override it globally, set the top-level `user_agent` field or use:
 
 ```bash
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
+SKILL_DIR="{skill_root}"
 
-$SKILL_CMD --json config set-user-agent --value "MyApp/1.0"
-$SKILL_CMD --json config clear-user-agent
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config set-user-agent --value "MyApp/1.0"
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config clear-user-agent
 ```
 
 ## OpenAI provider
@@ -104,13 +103,17 @@ OpenAI-compatible bases (e.g. `https://api.duckcoding.ai/v1`) work as long as th
 
 Codex `401` triggers exactly one access-token refresh, then a single retry. Refresh failures surface as `refresh_failed` errors.
 
-## Runtime discovery and update
+## Bundled runtime discovery and update
 
-Prefer the installed global CLI so the skill does not create or rely on repo-local `scripts/node_modules`.
+The skill always runs its own bundled launcher. Let `{skill_root}` mean the absolute directory containing this skill's `SKILL.md`; resolve the launcher from there and never from `cwd` or `PATH`.
 
 ```bash
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
+SKILL_DIR="{skill_root}"
 
-$SKILL_CMD --json doctor
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
 ```
+
+- The launcher resolves `cli-core.ts` relative to its own file, so every command works from any `cwd`.
+- If it reports `Bundled runtime dependencies are missing: ...`, initialize this skill copy once with `npm install --omit=dev --no-audit --no-fund --prefix "$SKILL_DIR/scripts"`. Nothing is installed globally.
+- Update the skill copy itself to update the runtime; a globally installed `gpt-image-2-skill` CLI is a separate product for shell and automation users and is never used as a fallback.

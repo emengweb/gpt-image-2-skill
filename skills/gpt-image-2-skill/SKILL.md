@@ -3,18 +3,26 @@ name: gpt-image-2-skill
 description: This skill should be used when the user asks to "generate an image", "create a logo", "draw an icon", "edit this photo", "change background to transparent", "remove background", "transparent background", "cut out", "isolate subject", "remove bg", "make transparent", "extract subject", "background removal", "批量抠图", "用 GPT image 生成图片", "用 Codex 画图", "帮我生成一张图", "批量生成图片", "精修这张图", "改成透明背景", "抠图", "把背景去掉", "把这张图编辑一下", or any prompt-to-image, reference-image-edit, standalone background-removal, or transparent PNG delivery task that benefits from a structured CLI returning JSON results and JSONL progress events. Supports OpenAI `gpt-image-2.5-flare` (speed-first default for generation and batch runs), `gpt-image-2.5-sunburst` (precision-first default for reference-image edits and final delivery), and any custom model name via `--model`, plus Codex `image_generation` (via `~/.codex/auth.json`) and merged `background-remove` local cutout workflows under one command surface, with masks, custom sizes up to 4K, transparent PNG verification, single-image and batch background removal, and a raw request escape hatch.
 ---
 
-Run image generation and editing through one CLI surface that hides provider differences. The runtime in `scripts/` is now pure TypeScript plus a thin CJS launcher.
+Run image generation and editing through one CLI surface that hides provider differences. The runtime in `scripts/` is pure TypeScript plus a thin CJS launcher, and this skill always runs that bundled launcher directly.
 
-## Runtime advice
+## Bundled runtime (required)
 
-- Prefer the installed global `gpt-image-2-skill` CLI so the skill does not create or reuse repo-local `scripts/node_modules`.
-- If the global CLI is missing, install it globally instead of writing dependencies into `scripts/`.
-- Reuse one resolved command string for the rest of the session so all examples hit the same runtime.
+Let `{skill_root}` mean the absolute directory that contains this `SKILL.md`, as reported when the skill was loaded. Resolve the launcher from that directory once per session; never derive it from the current working directory, and never fall back to a globally installed `gpt-image-2-skill` CLI.
 
 ```bash
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
+# {skill_root} = absolute skill directory (the folder containing this SKILL.md)
+SKILL_DIR="{skill_root}"
+
+# One-time local dependency init for this skill copy (installs nothing globally):
+# npm install --omit=dev --no-audit --no-fund --prefix "$SKILL_DIR/scripts"
+
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version
 ```
+
+- The launcher resolves its runtime relative to its own file, so every command below works from any `cwd`.
+- Always invoke it as `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" ...`; do not store the invocation in a shell variable, because a command string with an embedded path does not word-split under zsh.
+- If the launcher exits with `Bundled runtime dependencies are missing: ...`, run the local init command above once, then retry. It never installs globally and never substitutes a PATH CLI.
+- The standalone npm CLI (`gpt-image-2-skill` installed globally) is a separate product for shell and automation users; the skill does not use it.
 
 ## When to use this skill
 
@@ -31,52 +39,52 @@ SKILL_CMD="gpt-image-2-skill"
 Always pass `--json` so the result is machine-readable. Add `--json-events` when progress visibility matters.
 
 ```bash
-# 0. Resolve the runtime once
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
+# 0. Resolve the bundled runtime once (see "Bundled runtime")
+SKILL_DIR="{skill_root}"
 
-# 1. Confirm runtime + provider readiness
-$SKILL_CMD --json config inspect
-$SKILL_CMD --json doctor
-$SKILL_CMD --json auth inspect
+# 1. Confirm bundled runtime + provider readiness
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config inspect
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json auth inspect
 
 # 2. Generate a final transparent PNG deliverable
-$SKILL_CMD --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   transparent generate --prompt "..." --out /tmp/asset.png \
   --size 2K --quality high
 
 # 3. Generate a normal image (auto-selects provider; OpenAI first, then Codex)
 #    Generation defaults to the speed-first model; add --tier precision or --model <name> to change it.
-$SKILL_CMD --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   images generate --prompt "..." --out /tmp/out.png \
   --format png --size 2K
 
 # 4. Edit a reference image (OpenAI multipart)
 #    Reference-image edits default to the precision-first model.
-$SKILL_CMD --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   images edit --prompt "..." --ref-image /tmp/in.png --out /tmp/out.png
 
 # 5. Remove a controlled background from existing source images
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \
   --method auto --matte-color auto --strict
 
 # 6. Run standalone background-removal environment checks or direct cutouts
-$SKILL_CMD --json \\
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \\
   transparent extract --input /tmp/source-green.png --out /tmp/asset.png \\
   --method auto --matte-color auto --strict
 
 # 7. Verify the final file before delivery
-$SKILL_CMD --json \\
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \\
   transparent verify --input /tmp/asset.png --profile icon --strict
 
 # 8. Raw request escape hatch
-$SKILL_CMD --json \\
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \\
   request create --request-operation generate \\
   --body-file /tmp/body.json --out-image /tmp/out.png --expect-image
 
 # 9. Optional smoke check
-$SKILL_CMD --json doctor
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
 ```
 
 Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`. You can place `--provider <id>` before the command group or inside the subcommand; leave the default `--provider auto` to use `default_provider` first. Streaming now defaults to off; pass `--stream` when you want SSE/streaming behavior for a single request, or persist it on a provider via `config add-provider --stream`.
@@ -120,18 +128,15 @@ Notes that change how you pass flags:
 
 ## Runtime consistency check
 
-Before using newly documented command groups, especially `transparent generate`, `transparent extract`, or `transparent verify`, confirm the selected runtime is ready:
+Before using newly documented command groups, especially `transparent generate`, `transparent extract`, or `transparent verify`, confirm the bundled runtime is ready:
 
 ```bash
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
-
-$SKILL_CMD --json doctor
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json doctor
 ```
 
-If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
+If a documented subcommand fails unexpectedly, check the bundled runtime version with `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version`. The skill copy and its runtime ship together, so update or reinstall the skill itself instead of installing a global CLI; the runtime revision must match this document.
 
-For standalone cutout workflows, use `transparent extract` first. It works on a single source image and performs local background removal plus transparent verification. If a documented subcommand fails unexpectedly, first check the installed global CLI version and reinstall or upgrade it before troubleshooting provider behavior.
+For standalone cutout workflows, use `transparent extract` first. It works on a single source image and performs local background removal plus transparent verification. If a documented subcommand fails unexpectedly, check `node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --version` and update the skill copy itself before troubleshooting provider behavior.
 
 Background-removal prerequisites and behavior:
 
@@ -159,17 +164,14 @@ Auto-install behavior:
 Use the CLI config surface when the user asks to add or pin a provider:
 
 ```bash
-command -v gpt-image-2-skill >/dev/null 2>&1 || npm install --global gpt-image-2-skill
-SKILL_CMD="gpt-image-2-skill"
-
-$SKILL_CMD --json config path
-$SKILL_CMD --json config add-provider \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config path
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config add-provider \
   --name my-image-api \
   --type openai-compatible \
   --api-base https://example.com/v1 \
   --api-key sk-... \
   --set-default
-$SKILL_CMD --json config test-provider my-image-api
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json config test-provider my-image-api
 ```
 
 Credential sources supported by CLI, App, and Skill: `file`, `env`, and `keychain`. File credentials are stored in the shared config file; JSON output redacts them.
@@ -223,17 +225,17 @@ Direct-cutout quick examples:
 
 ```bash
 # Single image, default cutout path
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --input /tmp/photo.jpg --out /tmp/photo_nobg.png \
   --method auto --profile generic
 
 # Force chroma extraction for flat-matte graphics
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --input /tmp/icon.png --out /tmp/icon_nobg.png \
   --method chroma --profile icon --strict
 
 # Dual extraction for translucent assets
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --dark-image /tmp/glass-black.png --light-image /tmp/glass-white.png \
   --out /tmp/glass_nobg.png --method dual --profile translucent --strict
 ```
@@ -291,23 +293,23 @@ Examples:
 
 ```bash
 # Simple asset: final transparent PNG, sources hidden unless there is a failure
-$SKILL_CMD --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   transparent generate \
   --prompt "a polished fantasy sword game asset, no text, no frame" \
   --out /tmp/sword.png --size 2K --quality high
 
 # Agent-controlled single-image cutout flow (`background-remove` first, chroma fallback)
-$SKILL_CMD --json --json-events \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json --json-events \
   images generate \
   --prompt "a silver necklace, centered, on a perfectly flat pure magenta background, no shadow" \
   --out /tmp/necklace-magenta.png --format png --size 2K
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --method auto \
   --input /tmp/necklace-magenta.png --matte-color auto \
   --out /tmp/necklace.png --material sticker --strict
 
 # Semi-transparent material flow
-$SKILL_CMD --json \
+node "$SKILL_DIR/scripts/gpt_image_2_skill.cjs" --json \
   transparent extract --method dual \
   --dark-image /tmp/glow-on-black.png \
   --light-image /tmp/glow-on-white.png \
@@ -347,14 +349,14 @@ Direct-cutout error handling and retries:
 
 Load on demand for deeper detail:
 
-- `references/providers.md` — OpenAI / OpenAI-compatible / Codex selection, auth sources, runtime discovery, update policy, and resolution order.
+- `references/providers.md` — OpenAI / OpenAI-compatible / Codex selection, auth sources, bundled runtime discovery, update policy, and resolution order.
 - `references/sizes-and-formats.md` — size aliases, custom constraints, format/quality/compression/background, shared vs OpenAI-only flags.
 - `references/transparent-png.md` — Agent playbook for prompt design, controlled mattes, dual-background extraction, verification, and retry loops.
 - `references/json-output.md` — `--json` stdout schema, success and error envelopes, per-command shapes.
 - `references/json-events.md` — `--json-events` JSONL phases (`request_started`, `multipart_prepared`, `retry_scheduled`) and Codex SSE passthrough.
-- `references/troubleshooting.md` — install / command-not-found fixes, `auth_missing`, Codex `401` refresh, retry policy, size rejections, moderation, timeouts.
-- `../../docs/planned-transparent-background-strategy.md` — planned deterministic matte-color selection and transparent-intent routing improvements.
+- `references/troubleshooting.md` — bundled-runtime startup / missing-dependency fixes, `auth_missing`, Codex `401` refresh, retry policy, size rejections, moderation, timeouts.
+- `../../docs/planned-transparent-background-strategy.md` — planned deterministic matte-color selection and transparent-intent routing improvements (repository checkout only).
 
 ## Codex compatibility
 
-The companion file `agents/openai.yaml` is read by Codex Skill runtime only (Claude Code ignores it). Both runtimes execute the commands above with `cwd` at the skill directory, so the `SKILL_CMD` probe can safely decide between the checked-out local wrapper and the globally installed CLI.
+The companion file `agents/openai.yaml` is read by Codex Skill runtime only (Claude Code ignores it). Both runtimes execute the commands above against the loaded skill directory: `{skill_root}` is the absolute directory of this `SKILL.md`, so no command depends on `cwd`, on `PATH`, or on a globally installed CLI.

@@ -1,6 +1,6 @@
 # Sizes, formats, and shared options
 
-All values below come from `crates/gpt-image-2-skill/src/lib.rs`. Override with the matching `--size`, `--format`, `--quality`, `--compression`, or `--background` flag.
+All values below come from the TypeScript runtime under `skills/gpt-image-2-skill/scripts`. Override with the matching `--size`, `--format`, `--quality`, `--compression`, `--background`, `--model`, or `--tier` flag.
 
 ## Size aliases
 
@@ -33,6 +33,8 @@ Oversized square-ish inputs such as `5K` or `5120*5120` are auto-shrunk to the n
 
 | Flag | Values | Notes |
 |---|---|---|
+| `--model` | any model name, plus `flare` / `sunburst` aliases | image model for `images generate`, `images edit`, `transparent generate`; sent as the request `model` |
+| `--tier` | `auto` (default), `speed`, `precision` | purpose-based routing: `speed` → `gpt-image-2.5-flare`, `precision` → `gpt-image-2.5-sunburst` |
 | `--format` | `png`, `jpeg`, `webp` | output container |
 | `--quality` | `low`, `medium`, `high`, `auto` | provider-side rendering quality |
 | `--compression` | `0`–`100` | JPEG/WebP compression level |
@@ -42,6 +44,8 @@ Oversized square-ish inputs such as `5K` or `5120*5120` are auto-shrunk to the n
 
 | Flag | Honored by both | OpenAI only |
 |---|---|---|
+| `--model` | yes (OpenAI and OpenAI-compatible; under Codex it overrides the orchestrator model) | |
+| `--tier` | yes for OpenAI and OpenAI-compatible; Codex delegates the image model server-side, so only `model_resolution` records the tier | |
 | `--size` | yes | |
 | `--quality` | yes | |
 | `--format` | yes | |

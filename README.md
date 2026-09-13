@@ -20,10 +20,11 @@
 ## 功能特性
 
 - `images generate`、`images edit`、`transparent generate/extract/verify`、`background remove/doctor/init`、`request create`
-- OpenAI `gpt-image-2` 与兼容服务端，支持自定义 `--openai-api-base`
-- Codex `auth.json` 图片链路，默认模型 `gpt-5.4`
+- 双模型档位路由：默认生图使用速度优先的 `gpt-image-2.5-flare`，参考图编辑默认使用精度优先的 `gpt-image-2.5-sunburst`；`--model <名称>` 支持任意自定义模型名，`--tier speed|precision` 可按用途切换
+- OpenAI 与兼容服务端，支持自定义 base URL 与 provider 配置
+- Codex `auth.json` 图片链路，默认编排模型 `gpt-5.4`
 - `--json` stdout 结果与 `--json-events` stderr JSONL 进度事件
-- 融合 `background-remove` 的透明 PNG 主抠图链路，失败时自动回退到内建 chroma/dual 提取
+- 透明 PNG 原生生成：`transparent generate` 直接请求上游透明背景并校验 alpha；已有图片仍可用 `transparent extract` 做本地抠图
 - 透明 PNG 验证、尺寸别名与共享配置
 - React Web 前端位于 `apps/gpt-image-2-app`
 - Cloudflare relay Worker 位于 `workers/gpt-image-2-relay`
@@ -79,12 +80,32 @@ gpt-image-2-skill --json --json-events \
   --out ./apple.png
 ```
 
+模型档位（`--model` / `--tier`）：
+
+- 默认路由：`images generate` 与 `transparent generate` 使用速度优先的 `gpt-image-2.5-flare`；`images edit`（基于参考图的编辑）使用精度优先的 `gpt-image-2.5-sunburst`。
+- 显式切换：`--tier precision` 提升到精度档，`--tier speed` 回到速度档，`--model <名称>` 直接指定任意模型（`flare` / `sunburst` 为短别名）。
+- 优先级：`--model` > `--tier` > provider 配置里的 `model` > 操作默认。
+- 结果里的 `model_resolution` 会回显 `resolved_model`、`source`、`tier` 与 `reason`，`doctor` 输出 `model_routing` 默认值。
+
+```bash
+# 日常批量出图：默认 flare
+gpt-image-2-skill --json images generate --prompt "flat icon set, no text" --out ./icons/1.png
+
+# 广告成品图精修：显式精度档
+gpt-image-2-skill --json images edit --ref-image ./draft.png --prompt "keep layout, refine typography and lighting" --out ./final.png --tier precision
+
+# 指定自定义或旧版模型名
+gpt-image-2-skill --json images generate --prompt "hero banner" --out ./hero.png --model gpt-image-2
+```
+
+历史配置迁移：旧版本会把 `model: "gpt-image-2"` 写进 provider 配置（配置版本 1），该固定值遮蔽了档位路由；配置读取时会一次性迁移到版本 2 并清除这个旧默认值（`doctor` 的 `model_routing.legacy_model_pins` 会列出受影响的 provider）。迁移后写入的固定值会被保留，因此需要旧模型时用 `config add-provider --model gpt-image-2` 重新固定，或每次调用显式传 `--model gpt-image-2`。
+
 透明 PNG 工作流说明：
 
-- `transparent generate` 会先生成受控底图，再优先使用融合后的 `background-remove` 做抠图，失败或验证不佳时自动回退到当前 skill 内建的 chroma 提取。
-- `transparent extract --method auto` 会优先走 `background-remove`，若失败再回退到当前 skill 的 chroma/dual 抠图逻辑。
+- `transparent generate` 直接发送上游原生透明参数并输出 PNG，只做最终 alpha 校验，不生成受控底图，也不调用本地抠图。
+- `transparent extract --method auto` 用于已有图片，优先走 `background-remove`，失败再回退到本地 chroma/dual 抠图逻辑。
 - `transparent extract --method rembg` 表示强制只走融合后的 `background-remove`；`--method chroma` 表示强制只走本地 chroma。
-- JSON 输出里的 `selected_strategy` 与 `attempts` 可用于判断最终命中的抠图路径。
+- `transparent generate` 的 JSON 输出包含 `transparency_mode: "upstream-native"`；`selected_strategy` 与 `attempts` 仅适用于 `transparent extract`。
 
 独立抠图与初始化说明：
 

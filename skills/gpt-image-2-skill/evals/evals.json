@@ -93,6 +93,22 @@
         "if payload.ok === true and resolved provider is openai then /tmp/edit-white.png exists, is > 1024 bytes, and is visually opaque (alpha channel uniformly 255 in a non-edge sample)"
       ],
       "files": ["/tmp/source-logo.png (caller-provided fixture, transparent PNG)"]
+    },
+    {
+      "id": 7,
+      "name": "model-tier-routing",
+      "prompt": "Draw a simple flat icon of a coffee cup and save it to /tmp/tier-gen.png, then take /tmp/source-logo.png and tighten its layout and lighting into /tmp/tier-edit.png. Return JSON for both calls.",
+      "expected_output": "The generation call stays on the speed-first default and the reference-image edit call uses the precision-first default: no explicit --model or --tier is required. Each payload reports model_resolution.resolved_model, and the edit resolves to gpt-image-2.5-sunburst while the generate resolves to gpt-image-2.5-flare. An explicit --model <name> or --tier speed|precision must be honored when the caller asks for it.",
+      "assertions": [
+        "the generate command line includes 'images generate' and does NOT include --model or --tier unless the caller asked for a specific model",
+        "the edit command line includes 'images edit' and --ref-image /tmp/source-logo.png",
+        "payload.model_resolution.resolved_model === 'gpt-image-2.5-flare' for the generate payload when the resolved provider is openai or openai-compatible",
+        "payload.model_resolution.resolved_model === 'gpt-image-2.5-sunburst' for the edit payload when the resolved provider is openai or openai-compatible",
+        "payload.model_resolution.source is one of [operation_default, explicit_tier, explicit_model, provider_pin]",
+        "if the resolved provider is codex then payload.model_resolution.delegated_to_server === true",
+        "if --model gpt-image-2 was passed then payload.model_resolution.resolved_model === 'gpt-image-2' and payload.model_resolution.source === 'explicit_model'"
+      ],
+      "files": ["/tmp/source-logo.png (caller-provided fixture)"]
     }
   ]
 }

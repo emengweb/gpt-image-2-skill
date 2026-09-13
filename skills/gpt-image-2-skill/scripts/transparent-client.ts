@@ -7,11 +7,11 @@ import { requestGenerate } from "./openai-client.ts";
 import { runCodexImageCommand } from "./codex-client.ts";
 import { ensureParentDir } from "./fs-helpers.ts";
 import { JsonEventWriter } from "./json-events.ts";
+import type { ModelResolution } from "./model-routing.ts";
 import type { ProviderConfig } from "./types.ts";
 import type { ImageSizeResolution } from "./image-size.ts";
+import { DEFAULT_RETRY_COUNT } from "./constants.ts";
 import {
-  controlledMattePrompt,
-  chooseMatteColor,
   extractChromaFile,
   extractDualFile,
   normalizePngOutputPath,
@@ -84,16 +84,6 @@ type ExtractionAttempt = {
   };
 };
 
-type SourceAttemptSummary = {
-  attempt: number;
-  selected: boolean;
-  matte_color: string;
-  rule_bucket: string;
-  reason: string;
-  path: string;
-  source_prompt: string;
-};
-
 export async function runTransparentVerify(args: VerifyArgs) {
   const verification = verifyTransparentFile(args.input, {
     profile: args.profile as any,
@@ -157,6 +147,7 @@ export async function runTransparentGenerate(input: {
   prompt: string;
   out: string;
   instructions?: string;
+  modelResolution: ModelResolution;
   size?: string;
   sizeResolution?: ImageSizeResolution | null;
   quality?: string;
@@ -177,30 +168,16 @@ export async function runTransparentGenerate(input: {
   stream?: boolean;
   events: JsonEventWriter;
 }) {
-  if ((input.method ?? "auto") === "dual") {
-    throw new CliError(
-      "unsupported_option",
-      "transparent generate does not generate aligned dual-background sources. Generate the source pair explicitly, then call transparent extract --method dual.",
-    );
-  }
+  rejectRemovedExtractionOptions(input);
   const profile = (input.profile || "generic") as TransparentProfile;
-  const matteSelection = chooseMatteColor(input.prompt, profile, input.matteColor);
-  const manualMatteColor = parseMatteColorOrAuto(input.matteColor);
-  const selectedMethod = normalizeSingleImageMethod(input.method);
-  const sourcePath = sourceOutputPath(input);
-  const sourceAttempts: SourceAttemptSummary[] = [];
-  const extractionAttempts: ExtractionAttempt[] = [];
   const outPath = normalizePngOutputPath(input.out);
-  const canRetryMatte = manualMatteColor === null && matteSelection.retry_candidates.length > 0 && selectedMethod !== "rembg";
-  const primarySource = await generateTransparentSource({
+  const generation = await requestNativeTransparentImage({
     providerName: input.providerName,
     provider: input.provider,
     prompt: input.prompt,
-    baseSourcePrompt: input.sourcePrompt ?? input.prompt,
-    sourcePrompt: input.sourcePrompt,
-    matteColor: matteSelection.selected_matte_color,
-    sourcePath,
+    outPath,
     instructions: input.instructions,
+    model: input.modelResolution.resolved_model,
     size: input.size,
     sizeResolution: input.sizeResolution,
     quality: input.quality,
@@ -209,143 +186,156 @@ export async function runTransparentGenerate(input: {
     stream: input.stream,
     apiKey: input.apiKey,
     events: input.events,
-    providerType: input.provider.type,
   });
-  sourceAttempts.push({
-    attempt: 1,
-    selected: false,
-    matte_color: matteSelection.selected_matte_color,
-    rule_bucket: matteSelection.rule_bucket,
-    reason: matteSelection.reason,
-    path: primarySource.path,
-    source_prompt: primarySource.sourcePrompt,
-  });
-  try {
-    const backgroundRemoveAttempt =
-      selectedMethod === "auto" || selectedMethod === "rembg"
-        ? createBackgroundRemoveAttempt(primarySource.path, path.join(path.dirname(sourcePath), "background-remove.png"), profile)
-        : null;
-    if (backgroundRemoveAttempt) {
-      extractionAttempts.push(backgroundRemoveAttempt);
-      if (selectedMethod === "rembg") {
-        backgroundRemoveAttempt.selected = true;
-        sourceAttempts[0]!.selected = true;
-        return buildTransparentGenerateResponse({
-          input,
-          selectedMethod,
-          profile,
-          matteSelection,
-          sourceAttempts,
-          extractionResult: finalizeSelectedAttempt(
-            backgroundRemoveAttempt,
-            outPath,
-            profile,
-            true,
-            extractionAttempts,
-          ),
-          sourceGeneration: primarySource.generation,
-          sourcePath: input.sourceOut ? normalizePngOutputPath(input.sourceOut) : primarySource.path,
-        });
-      }
-    }
-
-    if (selectedMethod === "auto" || selectedMethod === "chroma") {
-      const chromaPrimary = createChromaFallbackAttempt({
-        inputPath: primarySource.path,
-        outPath: path.join(path.dirname(sourcePath), "chroma.png"),
-        profile,
-        material: input.material,
-        matteColor: matteSelection.selected_matte_color,
-        threshold: input.threshold,
-        softness: input.softness,
-        spillSuppression: input.spillSuppression,
-      });
-      extractionAttempts.push(chromaPrimary);
-      const primaryBestAttempt = selectBestAttempt(extractionAttempts);
-      if (primaryBestAttempt?.verification?.passed) {
-        primaryBestAttempt.selected = true;
-        sourceAttempts[0]!.selected = true;
-        return buildTransparentGenerateResponse({
-          input,
-          selectedMethod,
-          profile,
-          matteSelection,
-          sourceAttempts,
-          extractionResult: finalizeSelectedAttempt(primaryBestAttempt, outPath, profile, true, extractionAttempts),
-          sourceGeneration: primarySource.generation,
-          sourcePath: input.sourceOut ? normalizePngOutputPath(input.sourceOut) : primarySource.path,
-        });
-      }
-
-      if (canRetryMatte) {
-        const retryMatte = matteSelection.retry_candidates[0]!;
-        const retrySourcePath = retrySourceOutputPath(sourcePath, 2);
-        const retrySource = await generateTransparentSource({
-          providerName: input.providerName,
-          provider: input.provider,
-          prompt: input.prompt,
-          baseSourcePrompt: input.sourcePrompt ?? input.prompt,
-          sourcePrompt: input.sourcePrompt,
-          matteColor: retryMatte,
-          sourcePath: retrySourcePath,
-          instructions: input.instructions,
-          size: input.size,
-          sizeResolution: input.sizeResolution,
-          quality: input.quality,
-          compression: input.compression,
-          moderation: input.moderation,
-          stream: input.stream,
-          apiKey: input.apiKey,
-          events: input.events,
-          providerType: input.provider.type,
-        });
-        sourceAttempts.push({
-          attempt: 2,
-          selected: false,
-          matte_color: retryMatte,
-          rule_bucket: matteSelection.rule_bucket,
-          reason: `retry after primary chroma fallback failed: ${matteSelection.reason}`,
-          path: retrySource.path,
-          source_prompt: retrySource.sourcePrompt,
-        });
-        const chromaRetry = createChromaFallbackAttempt({
-          inputPath: retrySource.path,
-          outPath: path.join(path.dirname(sourcePath), "chroma-retry.png"),
-          profile,
-          material: input.material,
-          matteColor: retryMatte,
-          threshold: input.threshold,
-          softness: input.softness,
-          spillSuppression: input.spillSuppression,
-        });
-        extractionAttempts.push(chromaRetry);
-        if (chromaRetry.success && chromaRetry.verification?.passed) {
-          chromaRetry.selected = true;
-          sourceAttempts[1]!.selected = true;
-          return buildTransparentGenerateResponse({
-            input,
-            selectedMethod,
-            profile,
-            matteSelection: {
-              ...matteSelection,
-              selected_matte_color: retryMatte,
-              selected_matte_name: retrySource.matteName,
-            },
-            sourceAttempts,
-            extractionResult: finalizeSelectedAttempt(chromaRetry, outPath, profile, true, extractionAttempts),
-            sourceGeneration: retrySource.generation,
-            sourcePath: input.sourceOut ? normalizePngOutputPath(input.sourceOut) : retrySource.path,
-          });
-        }
-      }
-    }
-
-    throw new CliError("transparent_extraction_failed", "All transparent extraction attempts failed.", {
-      attempts: summarizeAttempts(extractionAttempts),
-    });
-  } finally {
-    cleanupTempSource(input, sourcePath);
+  const verification = verifyTransparentFile(outPath, { profile });
+  if (!verification.passed) {
+    throw new CliError(
+      "transparent_verification_failed",
+      "The upstream image did not pass transparent verification. Use `transparent extract` to cut out a matte-backed source locally, or `transparent verify` to inspect an existing PNG.",
+      { output: outPath, verification },
+    );
   }
+  return {
+    ok: true,
+    command: "transparent generate",
+    provider: input.providerName,
+    provider_selection: { resolved: input.providerName },
+    model_resolution: input.modelResolution,
+    transparency_mode: "upstream-native",
+    request: {
+      prompt: input.prompt,
+      model: input.modelResolution.resolved_model,
+      background: "transparent",
+      final_background_intent: "transparent",
+      profile,
+      size: input.size ?? null,
+      quality: input.quality ?? null,
+      format: "png",
+    },
+    ...(input.sizeResolution?.changed ? { size_normalization: input.sizeResolution } : {}),
+    generation: {
+      provider: input.providerName,
+      ...generation,
+    },
+    verification,
+    output: outputFileValue(outPath),
+  };
+}
+
+// 生成路径不再做本地抠图：任何抠图调参都提示改用 transparent extract，避免静默忽略。
+function rejectRemovedExtractionOptions(input: {
+  method?: string;
+  material?: string;
+  matteColor?: string;
+  sourcePrompt?: string;
+  sourceOut?: string;
+  reportDir?: string;
+  keepSources?: boolean;
+  threshold?: number;
+  softness?: number;
+  spillSuppression?: number;
+}) {
+  const removedOptions: string[] = [];
+  if (input.method !== undefined && input.method !== "auto") removedOptions.push("--method");
+  if (input.material !== undefined) removedOptions.push("--material");
+  if (input.matteColor !== undefined) removedOptions.push("--matte-color");
+  if (input.sourcePrompt !== undefined) removedOptions.push("--source-prompt");
+  if (input.sourceOut !== undefined) removedOptions.push("--source-out");
+  if (input.reportDir !== undefined) removedOptions.push("--report-dir");
+  if (input.keepSources === true) removedOptions.push("--keep-sources");
+  if (input.threshold !== undefined) removedOptions.push("--threshold");
+  if (input.softness !== undefined) removedOptions.push("--softness");
+  if (input.spillSuppression !== undefined) removedOptions.push("--spill-suppression");
+  if (removedOptions.length === 0) return;
+  throw new CliError(
+    "unsupported_option",
+    `transparent generate requests upstream-native transparency and no longer runs local extraction; ${removedOptions.join(", ")} ${
+      removedOptions.length === 1 ? "is" : "are"
+    } not supported. Use \`transparent extract\` for local matte cutout and \`transparent verify\` to inspect an existing PNG.`,
+    { removed_options: removedOptions },
+  );
+}
+
+async function requestNativeTransparentImage(input: {
+  providerName: string;
+  provider: ProviderConfig;
+  prompt: string;
+  outPath: string;
+  instructions?: string;
+  model: string;
+  size?: string;
+  sizeResolution?: ImageSizeResolution | null;
+  quality?: string;
+  compression?: number;
+  moderation?: string;
+  stream?: boolean;
+  apiKey?: string;
+  events: JsonEventWriter;
+}) {
+  if (input.provider.type === "codex") {
+    const result = await runCodexImageCommand({
+      providerName: input.providerName,
+      provider: input.provider,
+      command: "generate",
+      prompt: input.prompt,
+      out: input.outPath,
+      instructions: input.instructions,
+      model: input.model,
+      background: "transparent",
+      size: input.size,
+      quality: input.quality,
+      format: "png",
+      compression: input.compression,
+      stream: input.stream,
+      events: input.events,
+    });
+    return {
+      request: result.requestBody,
+      response: result.outcome.response,
+      output: normalizeSavedOutput(result.files),
+      retry: {
+        count: result.outcome.retryCount,
+        max_retries: DEFAULT_RETRY_COUNT,
+      },
+      auth: {
+        source: result.outcome.refreshed ? "refreshed" : "auth.json",
+        refreshed: result.outcome.refreshed,
+      },
+      events: { count: input.events.count() },
+    };
+  }
+  if (!input.apiKey) {
+    throw new CliError("auth_missing", "OpenAI API key is missing.");
+  }
+  const result = await requestGenerate(
+    input.provider,
+    input.apiKey,
+    {
+      prompt: input.prompt,
+      out: input.outPath,
+      model: input.model,
+      size: input.size,
+      sizeResolution: input.sizeResolution,
+      quality: input.quality,
+      format: "png",
+      background: "transparent",
+      compression: input.compression,
+      moderation: input.moderation,
+      stream: input.stream,
+    },
+    new AbortController().signal,
+    input.events,
+  );
+  return {
+    request: result.requestBody,
+    response: result.payload,
+    output: normalizeSavedOutput(result.files),
+    retry: {
+      count: 0,
+      max_retries: DEFAULT_RETRY_COUNT,
+    },
+    events: { count: input.events.count() },
+  };
 }
 
 function resolveExtractMethod(args: ExtractArgs) {
@@ -663,253 +653,4 @@ function normalizeSavedOutput(files: { index: number; path: string; bytes: numbe
     bytes: files.reduce((sum, file) => sum + file.bytes, 0),
     files,
   };
-}
-
-function sourceOutputPath(input: {
-  out: string;
-  sourceOut?: string;
-  reportDir?: string;
-}) {
-  if (input.sourceOut) return normalizePngOutputPath(input.sourceOut);
-  if (input.reportDir) {
-    fs.mkdirSync(input.reportDir, { recursive: true });
-    return path.join(input.reportDir, "source.png");
-  }
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-transparent-"));
-  return path.join(tempDir, "source.png");
-}
-
-function cleanupTempSource(
-  input: {
-    sourceOut?: string;
-    reportDir?: string;
-    keepSources?: boolean;
-  },
-  sourcePath: string,
-) {
-  if (input.keepSources || input.sourceOut || input.reportDir) return;
-  const parent = path.dirname(sourcePath);
-  if (path.basename(parent).startsWith("gpt-image-2-transparent-")) {
-    fs.rmSync(parent, { recursive: true, force: true });
-  }
-}
-
-async function generateTransparentSource(input: {
-  providerName: string;
-  provider: ProviderConfig;
-  prompt: string;
-  baseSourcePrompt: string;
-  sourcePrompt?: string;
-  matteColor: string;
-  sourcePath: string;
-  instructions?: string;
-  size?: string;
-  sizeResolution?: ImageSizeResolution | null;
-  quality?: string;
-  compression?: number;
-  moderation?: string;
-  stream?: boolean;
-  apiKey?: string;
-  events: JsonEventWriter;
-  providerType: ProviderConfig["type"];
-}) {
-  const sourcePrompt = input.sourcePrompt ?? controlledMattePrompt(input.baseSourcePrompt, input.matteColor);
-  if (input.providerType === "codex") {
-    const result = await runCodexImageCommand({
-      providerName: input.providerName,
-      provider: input.provider,
-      command: "generate",
-      prompt: sourcePrompt,
-      out: input.sourcePath,
-      instructions: input.instructions,
-      background: "opaque",
-      size: input.size,
-      quality: input.quality,
-      format: "png",
-      compression: input.compression,
-      stream: input.stream,
-      events: input.events,
-    });
-    return {
-      path: input.sourcePath,
-      sourcePrompt,
-      matteName: matteColorNameFromHex(input.matteColor),
-      generation: {
-        provider: input.providerName,
-        request: result.requestBody,
-        response: result.outcome.response,
-        output: normalizeSavedOutput(result.files),
-        retry: {
-          count: result.outcome.retryCount,
-          max_retries: 3,
-        },
-        auth: {
-          source: result.outcome.refreshed ? "refreshed" : "auth.json",
-          refreshed: result.outcome.refreshed,
-        },
-        events: { count: input.events.count() },
-      },
-    };
-  }
-  if (!input.apiKey) {
-    throw new CliError("auth_missing", "OpenAI API key is missing.");
-  }
-  const result = await requestGenerate(
-    input.provider,
-    input.apiKey,
-    {
-      prompt: sourcePrompt,
-      out: input.sourcePath,
-      size: input.size,
-      sizeResolution: input.sizeResolution,
-      quality: input.quality,
-      format: "png",
-      background: "opaque",
-      compression: input.compression,
-      moderation: input.moderation,
-      stream: input.stream,
-    },
-    new AbortController().signal,
-    input.events,
-  );
-  return {
-    path: input.sourcePath,
-    sourcePrompt,
-    matteName: matteColorNameFromHex(input.matteColor),
-    generation: {
-      provider: input.providerName,
-      request: result.requestBody,
-      response: result.payload,
-      output: normalizeSavedOutput(result.files),
-      retry: {
-        count: 0,
-        max_retries: 3,
-      },
-      events: { count: input.events.count() },
-    },
-  };
-}
-
-function matteColorNameFromHex(matteColor: string) {
-  switch (matteColor.toLowerCase()) {
-    case "#ff00ff":
-      return "magenta";
-    case "#00ffff":
-      return "cyan";
-    case "#0000ff":
-      return "blue";
-    case "#00ff00":
-      return "green";
-    case "#000000":
-      return "black";
-    case "#ffffff":
-      return "white";
-    default:
-      return "magenta";
-  }
-}
-
-function buildTransparentGenerateResponse(input: {
-  input: {
-    providerName: string;
-    prompt: string;
-    out: string;
-    size?: string;
-    sizeResolution?: ImageSizeResolution | null;
-    quality?: string;
-    compression?: number;
-    moderation?: string;
-    method?: string;
-    profile?: string;
-    material?: string;
-    matteColor?: string;
-    sourcePrompt?: string;
-    sourceOut?: string;
-    reportDir?: string;
-    keepSources?: boolean;
-  };
-  selectedMethod: "auto" | "rembg" | "chroma";
-  profile: TransparentProfile;
-  matteSelection: {
-    requested_matte_color: string | null;
-    selected_matte_color: string;
-    selected_matte_name: string;
-    rule_bucket: string;
-    reason: string;
-    retry_candidates: string[];
-  };
-  sourceAttempts: SourceAttemptSummary[];
-  extractionResult: {
-    selectedStrategy: "background-remove" | "chroma" | "dual";
-    attempts: ExtractionAttempt[];
-    extraction: SelectedExtractionReport;
-    verification: TransparentVerification;
-  };
-  sourceGeneration: Record<string, unknown>;
-  sourcePath: string;
-}) {
-  const finalSourcePath = input.input.sourceOut ? normalizePngOutputPath(input.input.sourceOut) : input.sourcePath;
-  if (input.sourcePath !== finalSourcePath) {
-    ensureParentDir(finalSourcePath);
-    fs.copyFileSync(input.sourcePath, finalSourcePath);
-  }
-  const preferredMethod =
-    input.selectedMethod === "auto"
-      ? "background-remove"
-      : input.selectedMethod === "rembg"
-        ? "background-remove"
-        : input.selectedMethod;
-  return {
-    ok: true,
-    command: "transparent generate",
-    provider: input.input.providerName,
-    provider_selection: { resolved: input.input.providerName },
-    request: {
-      prompt: input.input.prompt,
-      source_prompt: input.sourceAttempts.at(-1)?.source_prompt ?? input.input.sourcePrompt ?? input.input.prompt,
-      final_background_intent: "transparent",
-      intermediate_extraction_background: {
-        requested_matte_color: input.matteSelection.requested_matte_color,
-        selected_matte_color: input.matteSelection.selected_matte_color,
-        selected_matte_name: input.matteSelection.selected_matte_name,
-        rule_bucket: input.matteSelection.rule_bucket,
-        reason: input.matteSelection.reason,
-        retry_candidates: input.matteSelection.retry_candidates,
-      },
-      method: input.selectedMethod,
-      preferred_method: preferredMethod,
-      fallback_method: input.selectedMethod === "auto" ? "chroma" : null,
-      profile: input.profile || "generic",
-      requested_matte_color: input.matteSelection.requested_matte_color,
-      selected_matte_color: input.matteSelection.selected_matte_color,
-      selected_matte_name: input.matteSelection.selected_matte_name,
-      matte_color: input.extractionResult.extraction.matte_color,
-      matte_color_source: input.extractionResult.extraction.matte_color_source,
-      threshold: input.extractionResult.extraction.threshold,
-      softness: input.extractionResult.extraction.softness,
-      spill_suppression: input.extractionResult.extraction.spill_suppression,
-      material: input.input.material ?? null,
-      size: input.input.size ?? null,
-      quality: input.input.quality ?? null,
-      format: "png",
-    },
-    ...(input.input.sizeResolution?.changed ? { size_normalization: input.input.sizeResolution } : {}),
-    source: {
-      path: finalSourcePath,
-      kept: Boolean(input.input.keepSources || input.input.sourceOut || input.input.reportDir),
-      attempts: input.sourceAttempts,
-      generation: input.sourceGeneration,
-    },
-    selected_strategy: input.extractionResult.selectedStrategy,
-    attempts: summarizeAttempts(input.extractionResult.attempts),
-    extraction: input.extractionResult.extraction,
-    verification: input.extractionResult.verification,
-    output: outputFileValue(normalizePngOutputPath(input.input.out)),
-  };
-}
-
-function retrySourceOutputPath(sourcePath: string, attempt: number) {
-  const ext = path.extname(sourcePath) || ".png";
-  const base = path.basename(sourcePath, ext);
-  return path.join(path.dirname(sourcePath), `${base}-retry-${attempt}${ext}`);
 }

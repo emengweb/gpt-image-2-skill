@@ -48,6 +48,15 @@ Provider auth absent for the resolved provider.
 
 Use `--json auth inspect` to see which provider has `ready: true`.
 
+## Unknown or unsupported model
+
+The runtime sends `model_resolution.resolved_model` as the request `model`. Upstream failures surface as `http_error` with a 400/404 body such as `model_not_found` or `unknown model`.
+
+- Check what was actually sent: read `model_resolution` in the JSON result, or run `--json doctor`. `doctor` reports the routing defaults under `model_routing` and lists providers whose legacy `gpt-image-2` pin was dropped under `model_routing.legacy_model_pins`.
+- Defaults are `gpt-image-2.5-flare` (generate) and `gpt-image-2.5-sunburst` (edit). A proxy or vendor endpoint that serves only another name must be pinned with `--model <name>` or `config add-provider --model <name>`.
+- If an upstream still serves only the previous generation, pass `--model gpt-image-2` per call or re-pin the provider with `config add-provider --model gpt-image-2`.
+- Config version 1 pinned `model: "gpt-image-2"` on providers; that legacy pin is dropped once when the config is migrated to version 2 so routing applies. A pin added afterwards (config version 2) is honored. See `references/providers.md`.
+
 ## `auth_parse_failed`
 
 `auth.json` exists but cannot be parsed. Re-sign-in through Codex desktop, or restore a known-good `auth.json` from backup.

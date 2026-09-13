@@ -14,8 +14,12 @@ import { chooseMatteColor } from "./transparent-core.ts";
 import { resolveUserAgent } from "./config-store.ts";
 import { normalizeAndValidateImageSize, normalizeImageSizeInBody } from "./image-size.ts";
 import { loadImageSourceBytes } from "./image-sources.ts";
+import { normalizeTier, resolveRequestModel } from "./model-routing.ts";
 
 const tinyPngBase64 = Buffer.from("fake-image").toString("base64");
+// 8x8 带真实 alpha 通道的 PNG，用于验证原生透明输入输出链路。
+const transparentPngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==";
 const require = createRequire(import.meta.url);
 
 function provider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
@@ -189,6 +193,143 @@ exit 1
   );
 }
 
+function cliBinPath() {
+  return path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
+}
+
+function writeOpenAiCaptureStub(filePath: string, imageBase64: string = tinyPngBase64) {
+  fs.writeFileSync(
+    filePath,
+    `
+const fs = require("node:fs");
+const captureFile = process.env.TEST_CAPTURE_FILE;
+function plainEntries(value) {
+  const entries = {};
+  for (const [key, entry] of value.entries()) {
+    entries[key] = typeof entry === "string"
+      ? entry
+      : { name: entry.name, size: entry.size ?? entry.length ?? null };
+  }
+  return entries;
+}
+globalThis.fetch = async (input, init = {}) => {
+  const body = init.body;
+  const transport = body && typeof body.get === "function" ? "multipart" : "json";
+  fs.writeFileSync(captureFile, JSON.stringify({
+    url: String(input),
+    transport,
+    body: transport === "multipart" ? plainEntries(body) : JSON.parse(String(body))
+  }));
+  return new Response(JSON.stringify({
+    created: 1,
+    data: [{ b64_json: ${JSON.stringify(imageBase64)} }]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+};
+`,
+  );
+}
+
+function createCliSandbox(
+  providers: Record<string, unknown>,
+  defaultProvider?: string,
+) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
+  const codexHome = path.join(tempDir, ".codex");
+  const configDir = path.join(codexHome, "gpt-image-2-skill");
+  const captureFile = path.join(tempDir, "capture.json");
+  const fetchStubPath = path.join(tempDir, "fetch-stub.cjs");
+  const refImagePath = path.join(tempDir, "ref.png");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      ...(defaultProvider ? { default_provider: defaultProvider } : {}),
+      providers,
+    }),
+  );
+  writeOpenAiCaptureStub(fetchStubPath);
+  writeRgbPngWithoutAlpha(refImagePath);
+  return { tempDir, codexHome, configDir, captureFile, fetchStubPath, refImagePath };
+}
+
+function runSandboxCli(
+  sandbox: ReturnType<typeof createCliSandbox>,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+) {
+  const result = childProcess.spawnSync(
+    process.execPath,
+    ["--require", sandbox.fetchStubPath, cliBinPath(), "--json", ...args],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_HOME: sandbox.codexHome,
+        TEST_CAPTURE_FILE: sandbox.captureFile,
+        ...extraEnv,
+      },
+    },
+  );
+  const payload = result.status === 0 ? JSON.parse(result.stdout) : JSON.parse(result.stdout || "null");
+  const capture = fs.existsSync(sandbox.captureFile)
+    ? JSON.parse(fs.readFileSync(sandbox.captureFile, "utf8"))
+    : null;
+  return { result, payload, capture };
+}
+
+function removeCliSandbox(sandbox: ReturnType<typeof createCliSandbox>) {
+  fs.rmSync(sandbox.tempDir, { recursive: true, force: true });
+}
+
+function writeCodexAuth(sandbox: ReturnType<typeof createCliSandbox>) {
+  fs.mkdirSync(sandbox.codexHome, { recursive: true });
+  fs.writeFileSync(
+    path.join(sandbox.codexHome, "auth.json"),
+    JSON.stringify({ access_token: "token", refresh_token: "refresh", account_id: "acct" }),
+  );
+}
+
+function writeCodexSseStub(filePath: string, imageBase64: string = tinyPngBase64) {
+  fs.writeFileSync(
+    filePath,
+    `
+const fs = require("node:fs");
+globalThis.fetch = async (input, init = {}) => {
+  fs.writeFileSync(process.env.TEST_CAPTURE_FILE, JSON.stringify({
+    url: String(input),
+    body: JSON.parse(String(init.body ?? "{}"))
+  }));
+  const lines = [
+    'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}\\n\\n',
+    'data: {"type":"response.output_item.done","item":{"id":"item_1","type":"image_generation_call","status":"completed","result":"${imageBase64}"}}\\n\\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4"}}\\n\\n',
+    "data: [DONE]\\n\\n"
+  ];
+  return new Response(lines.join(""), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" }
+  });
+};
+`,
+  );
+}
+
+function mockOpenAiProvider(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "openai-compatible",
+    api_base: "https://mock.example/v1",
+    supports_n: true,
+    credentials: {
+      api_key: { source: "file", value: "sk-test" },
+    },
+    ...overrides,
+  };
+}
+
 test("generate body defaults to response_format=b64_json and stream=false", () => {
   const body = buildGenerateBody(provider(), {
     prompt: "hello",
@@ -248,6 +389,177 @@ test("request body size normalization rewrites raw size shorthands", () => {
     size: "1024x1024",
     prompt: "hello",
   });
+});
+
+test("model routing defaults generation to the speed-first model", () => {
+  const resolution = resolveRequestModel({ providerType: "openai", operation: "generate" });
+  assert.equal(resolution.resolved_model, "gpt-image-2.5-flare");
+  assert.equal(resolution.tier, "speed");
+  assert.equal(resolution.tier_source, "operation_default");
+  assert.equal(resolution.source, "operation_default");
+  assert.equal(resolution.delegated_to_server, false);
+  assert.equal(resolution.requested_model, null);
+});
+
+test("model routing defaults reference-image edits to the precision-first model", () => {
+  const resolution = resolveRequestModel({ providerType: "openai-compatible", operation: "edit" });
+  assert.equal(resolution.resolved_model, "gpt-image-2.5-sunburst");
+  assert.equal(resolution.tier, "precision");
+  assert.equal(resolution.source, "operation_default");
+});
+
+test("model routing honors an explicit --model over every other source", () => {
+  const resolution = resolveRequestModel({
+    providerType: "openai",
+    operation: "edit",
+    providerModel: "vendor-image-v3",
+    requestedModel: "gpt-image-2",
+    requestedTier: "speed",
+  });
+  assert.equal(resolution.resolved_model, "gpt-image-2");
+  assert.equal(resolution.source, "explicit_model");
+  assert.equal(resolution.tier, "speed");
+});
+
+test("model routing resolves flare and sunburst aliases while passing custom names through", () => {
+  assert.equal(
+    resolveRequestModel({ providerType: "openai", operation: "generate", requestedModel: "sunburst" })
+      .resolved_model,
+    "gpt-image-2.5-sunburst",
+  );
+  assert.equal(
+    resolveRequestModel({ providerType: "openai", operation: "edit", requestedModel: "flare" })
+      .resolved_model,
+    "gpt-image-2.5-flare",
+  );
+  const custom = resolveRequestModel({
+    providerType: "openai-compatible",
+    operation: "generate",
+    requestedModel: "my-vendor-image-7",
+  });
+  assert.equal(custom.resolved_model, "my-vendor-image-7");
+  assert.equal(custom.tier, "speed");
+  assert.equal(custom.tier_source, "operation_default");
+});
+
+test("model routing lets --tier override the operation default", () => {
+  const precisionGenerate = resolveRequestModel({
+    providerType: "openai",
+    operation: "generate",
+    requestedTier: "precision",
+  });
+  assert.equal(precisionGenerate.resolved_model, "gpt-image-2.5-sunburst");
+  assert.equal(precisionGenerate.tier, "precision");
+  assert.equal(precisionGenerate.tier_source, "explicit");
+  assert.equal(precisionGenerate.source, "explicit_tier");
+
+  const speedEdit = resolveRequestModel({
+    providerType: "openai",
+    operation: "edit",
+    requestedTier: "speed",
+  });
+  assert.equal(speedEdit.resolved_model, "gpt-image-2.5-flare");
+  assert.equal(speedEdit.tier, "speed");
+  assert.equal(speedEdit.source, "explicit_tier");
+
+  const tierOverPin = resolveRequestModel({
+    providerType: "openai-compatible",
+    operation: "edit",
+    providerModel: "vendor-image-v3",
+    requestedTier: "precision",
+  });
+  assert.equal(tierOverPin.resolved_model, "gpt-image-2.5-sunburst");
+  assert.equal(tierOverPin.source, "explicit_tier");
+});
+
+test("model routing honors provider pins as given by the config layer", () => {
+  const pinned = resolveRequestModel({
+    providerType: "openai-compatible",
+    operation: "generate",
+    providerModel: "vendor-image-v3",
+  });
+  assert.equal(pinned.resolved_model, "vendor-image-v3");
+  assert.equal(pinned.source, "provider_pin");
+  assert.equal(pinned.provider_model, "vendor-image-v3");
+
+  // legacy gpt-image-2 固定值的清理由 config-store 的版本化迁移负责，路由层原样尊重传入的固定值。
+  const legacyPin = resolveRequestModel({
+    providerType: "openai",
+    operation: "generate",
+    providerModel: "gpt-image-2",
+  });
+  assert.equal(legacyPin.resolved_model, "gpt-image-2");
+  assert.equal(legacyPin.source, "provider_pin");
+});
+
+test("model routing keeps Codex on the orchestrator model and marks server-side delegation", () => {
+  const routed = resolveRequestModel({ providerType: "codex", operation: "edit" });
+  assert.equal(routed.resolved_model, "gpt-5.4");
+  assert.equal(routed.source, "codex_default");
+  assert.equal(routed.delegated_to_server, true);
+  assert.equal(routed.tier, "precision");
+
+  const overridden = resolveRequestModel({
+    providerType: "codex",
+    operation: "generate",
+    requestedModel: "gpt-5.4-mini",
+  });
+  assert.equal(overridden.resolved_model, "gpt-5.4-mini");
+  assert.equal(overridden.source, "explicit_model");
+});
+
+test("model routing rejects unknown tiers", () => {
+  assert.equal(normalizeTier("auto"), null);
+  assert.equal(normalizeTier("turbo"), null);
+  assert.equal(normalizeTier(undefined), null);
+  assert.equal(normalizeTier("speed"), "speed");
+  assert.equal(normalizeTier("precision"), "precision");
+});
+
+test("model routing treats prototype-like names as plain custom model names", () => {
+  const resolution = resolveRequestModel({
+    providerType: "openai",
+    operation: "generate",
+    requestedModel: "__proto__",
+  });
+  assert.equal(resolution.resolved_model, "__proto__");
+  assert.equal(resolution.tier, "speed");
+  assert.equal(resolution.tier_source, "operation_default");
+  assert.equal(resolution.source, "explicit_model");
+
+  const pinned = resolveRequestModel({
+    providerType: "openai-compatible",
+    operation: "edit",
+    providerModel: "constructor",
+  });
+  assert.equal(pinned.resolved_model, "constructor");
+  assert.equal(pinned.tier, "precision");
+});
+
+test("model routing reports the explicit model tier over a conflicting --tier", () => {
+  // --model 优先级高于 --tier：tier 必须描述实际发送的模型，而不是被忽略的 flag。
+  const precisionModel = resolveRequestModel({
+    providerType: "openai",
+    operation: "generate",
+    requestedModel: "sunburst",
+    requestedTier: "speed",
+  });
+  assert.equal(precisionModel.resolved_model, "gpt-image-2.5-sunburst");
+  assert.equal(precisionModel.tier, "precision");
+  assert.equal(precisionModel.tier_source, "model_name");
+  assert.equal(precisionModel.source, "explicit_model");
+
+  // 自定义模型没有已知档位时，--tier 仍作为声明式档位记录。
+  const customModel = resolveRequestModel({
+    providerType: "openai-compatible",
+    operation: "generate",
+    requestedModel: "vendor-image-v3",
+    requestedTier: "precision",
+  });
+  assert.equal(customModel.resolved_model, "vendor-image-v3");
+  assert.equal(customModel.tier, "precision");
+  assert.equal(customModel.tier_source, "explicit");
+  assert.equal(customModel.source, "explicit_model");
 });
 
 test("resolveUserAgent defaults to OpenAI/JS 4.96.0 and trims custom values", () => {
@@ -1323,6 +1635,524 @@ globalThis.fetch = async (input, init = {}) => {
   }
 });
 
+test("cli images generate defaults to the speed-first model and reports model_resolution", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const outPath = path.join(sandbox.tempDir, "out.png");
+  try {
+    const { result, payload, capture } = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "apple",
+      "--out",
+      outPath,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(payload.model_resolution.operation, "generate");
+    assert.equal(payload.model_resolution.tier, "speed");
+    assert.equal(payload.model_resolution.source, "operation_default");
+    assert.equal(payload.model_resolution.resolved_model, "gpt-image-2.5-flare");
+    assert.equal(payload.request.model, "gpt-image-2.5-flare");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli images edit defaults reference-image edits to the precision-first model", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const outPath = path.join(sandbox.tempDir, "edit-out.png");
+  try {
+    const { result, payload, capture } = runSandboxCli(sandbox, [
+      "images",
+      "edit",
+      "--prompt",
+      "make the background white",
+      "--ref-image",
+      sandbox.refImagePath,
+      "--out",
+      outPath,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(capture.transport, "multipart");
+    assert.match(capture.url, /\/images\/edits$/);
+    assert.equal(capture.body.model, "gpt-image-2.5-sunburst");
+    assert.equal(payload.model_resolution.operation, "edit");
+    assert.equal(payload.model_resolution.tier, "precision");
+    assert.equal(payload.model_resolution.resolved_model, "gpt-image-2.5-sunburst");
+    assert.equal(payload.request.model, "gpt-image-2.5-sunburst");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli images honors --tier and --model overrides for both operations", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const generateOut = path.join(sandbox.tempDir, "precision.png");
+  const editOut = path.join(sandbox.tempDir, "fast-edit.png");
+  const legacyOut = path.join(sandbox.tempDir, "legacy.png");
+  try {
+    const precision = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "hero banner",
+      "--out",
+      generateOut,
+      "--tier",
+      "precision",
+    ]);
+    assert.equal(precision.result.status, 0, precision.result.stderr);
+    assert.equal(precision.capture.body.model, "gpt-image-2.5-sunburst");
+    assert.equal(precision.payload.model_resolution.tier_source, "explicit");
+
+    const speed = runSandboxCli(sandbox, [
+      "images",
+      "edit",
+      "--prompt",
+      "quick touch up",
+      "--ref-image",
+      sandbox.refImagePath,
+      "--out",
+      editOut,
+      "--tier",
+      "speed",
+    ]);
+    assert.equal(speed.result.status, 0, speed.result.stderr);
+    assert.equal(speed.capture.body.model, "gpt-image-2.5-flare");
+
+    const legacy = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "legacy model",
+      "--out",
+      legacyOut,
+      "--model",
+      "gpt-image-2",
+    ]);
+    assert.equal(legacy.result.status, 0, legacy.result.stderr);
+    assert.equal(legacy.capture.body.model, "gpt-image-2");
+    assert.equal(legacy.payload.model_resolution.source, "explicit_model");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli images resolves flare and sunburst aliases and honors provider pins", () => {
+  const pinned = createCliSandbox(
+    { mock: mockOpenAiProvider({ model: "vendor-image-v3" }) },
+    "mock",
+  );
+  const legacyPinned = createCliSandbox(
+    { mock: mockOpenAiProvider({ model: "gpt-image-2" }) },
+    "mock",
+  );
+  const aliasSandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  try {
+    const vendor = runSandboxCli(pinned, [
+      "images",
+      "generate",
+      "--prompt",
+      "vendor model",
+      "--out",
+      path.join(pinned.tempDir, "vendor.png"),
+    ]);
+    assert.equal(vendor.result.status, 0, vendor.result.stderr);
+    assert.equal(vendor.capture.body.model, "vendor-image-v3");
+    assert.equal(vendor.payload.model_resolution.source, "provider_pin");
+
+    const legacy = runSandboxCli(legacyPinned, [
+      "images",
+      "generate",
+      "--prompt",
+      "legacy pin",
+      "--out",
+      path.join(legacyPinned.tempDir, "legacy-pin.png"),
+    ]);
+    assert.equal(legacy.result.status, 0, legacy.result.stderr);
+    assert.equal(legacy.capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(legacy.payload.model_resolution.source, "operation_default");
+
+    const alias = runSandboxCli(aliasSandbox, [
+      "images",
+      "edit",
+      "--prompt",
+      "alias model",
+      "--ref-image",
+      aliasSandbox.refImagePath,
+      "--out",
+      path.join(aliasSandbox.tempDir, "alias.png"),
+      "--model",
+      "flare",
+    ]);
+    assert.equal(alias.result.status, 0, alias.result.stderr);
+    assert.equal(alias.capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(alias.payload.model_resolution.tier, "speed");
+  } finally {
+    removeCliSandbox(pinned);
+    removeCliSandbox(legacyPinned);
+    removeCliSandbox(aliasSandbox);
+  }
+});
+
+test("cli images rejects an unknown --tier value before sending a request", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  try {
+    const { result, payload } = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "bad tier",
+      "--out",
+      path.join(sandbox.tempDir, "bad.png"),
+      "--tier",
+      "turbo",
+    ]);
+    assert.equal(result.status, 1);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, "invalid_argument");
+    assert.match(payload.error.message, /--tier/);
+    assert.equal(fs.existsSync(sandbox.captureFile), false);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli request create injects the routed default model when the body omits model", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const bodyFile = path.join(sandbox.tempDir, "body.json");
+  fs.writeFileSync(bodyFile, JSON.stringify({ prompt: "apple" }));
+  const editBodyFile = path.join(sandbox.tempDir, "edit-body.json");
+  fs.writeFileSync(editBodyFile, JSON.stringify({ prompt: "apple", images: [sandbox.refImagePath] }));
+  try {
+    const generated = runSandboxCli(sandbox, [
+      "request",
+      "create",
+      "--request-operation",
+      "generate",
+      "--body-file",
+      bodyFile,
+    ]);
+    assert.equal(generated.result.status, 0, generated.result.stderr);
+    assert.equal(generated.capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(generated.payload.model_resolution.resolved_model, "gpt-image-2.5-flare");
+
+    const edited = runSandboxCli(sandbox, [
+      "request",
+      "create",
+      "--request-operation",
+      "edit",
+      "--body-file",
+      editBodyFile,
+    ]);
+    assert.equal(edited.result.status, 0, edited.result.stderr);
+    assert.equal(edited.capture.body.model, "gpt-image-2.5-sunburst");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli request create keeps an explicit body model untouched", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const bodyFile = path.join(sandbox.tempDir, "body.json");
+  fs.writeFileSync(bodyFile, JSON.stringify({ model: "gpt-image-2", prompt: "apple" }));
+  const vendorBodyFile = path.join(sandbox.tempDir, "vendor-body.json");
+  fs.writeFileSync(
+    vendorBodyFile,
+    JSON.stringify({ model: "vendor-image-v3", prompt: "apple", images: [sandbox.refImagePath] }),
+  );
+  const aliasBodyFile = path.join(sandbox.tempDir, "alias-body.json");
+  fs.writeFileSync(aliasBodyFile, JSON.stringify({ model: "flare", prompt: "apple" }));
+  try {
+    const legacy = runSandboxCli(sandbox, [
+      "request",
+      "create",
+      "--request-operation",
+      "generate",
+      "--body-file",
+      bodyFile,
+    ]);
+    assert.equal(legacy.result.status, 0, legacy.result.stderr);
+    assert.equal(legacy.capture.body.model, "gpt-image-2");
+    assert.equal(legacy.payload.model_resolution.source, "explicit_model");
+    assert.equal(legacy.payload.request.model, "gpt-image-2");
+
+    const vendor = runSandboxCli(sandbox, [
+      "request",
+      "create",
+      "--request-operation",
+      "edit",
+      "--body-file",
+      vendorBodyFile,
+    ]);
+    assert.equal(vendor.result.status, 0, vendor.result.stderr);
+    assert.equal(vendor.capture.body.model, "vendor-image-v3");
+    assert.equal(vendor.payload.model_resolution.source, "explicit_model");
+
+    const alias = runSandboxCli(sandbox, [
+      "request",
+      "create",
+      "--request-operation",
+      "generate",
+      "--body-file",
+      aliasBodyFile,
+    ]);
+    assert.equal(alias.result.status, 0, alias.result.stderr);
+    assert.equal(alias.capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(alias.payload.model_resolution.tier, "speed");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli doctor reports the model routing defaults", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  try {
+    const { result, payload } = runSandboxCli(sandbox, ["doctor"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(payload.model_routing.generate, "gpt-image-2.5-flare");
+    assert.equal(payload.model_routing.edit, "gpt-image-2.5-sunburst");
+    assert.equal(payload.model_routing.legacy_openai_model, "gpt-image-2");
+    assert.deepEqual(payload.model_routing.tiers, ["speed", "precision"]);
+    assert.deepEqual(payload.model_routing.legacy_model_pins, []);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli doctor lists providers whose legacy model pin was migrated away", () => {
+  const sandbox = createCliSandbox(
+    {
+      legacy: mockOpenAiProvider({ model: "gpt-image-2" }),
+      vendor: mockOpenAiProvider({ model: "vendor-image-v3" }),
+    },
+    "legacy",
+  );
+  try {
+    const { result, payload } = runSandboxCli(sandbox, ["doctor"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(payload.model_routing.legacy_model_pins, ["legacy"]);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli keeps an explicit model pin once the config is migrated to the routing schema", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider({ model: "gpt-image-2" }) }, "mock");
+  const configFile = path.join(sandbox.configDir, "config.json");
+  const outPath = path.join(sandbox.tempDir, "pinned.png");
+  try {
+    // 模拟迁移后的配置文件：版本 2 表示用户在此之后显式固定，不应再被清理。
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({
+        version: 2,
+        default_provider: "mock",
+        providers: { mock: mockOpenAiProvider({ model: "gpt-image-2" }) },
+      }),
+    );
+    const pinned = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "legacy pinned",
+      "--out",
+      outPath,
+    ]);
+    assert.equal(pinned.result.status, 0, pinned.result.stderr);
+    assert.equal(pinned.capture.body.model, "gpt-image-2");
+    assert.equal(pinned.payload.model_resolution.source, "provider_pin");
+
+    const doctor = runSandboxCli(sandbox, ["doctor"]);
+    assert.deepEqual(doctor.payload.model_routing.legacy_model_pins, []);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli config add-provider --model gpt-image-2 produces a pin that survives later reads", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const outPath = path.join(sandbox.tempDir, "repinned.png");
+  try {
+    const added = childProcess.spawnSync(
+      process.execPath,
+      [
+        cliBinPath(),
+        "--json",
+        "config",
+        "add-provider",
+        "--name",
+        "legacy",
+        "--type",
+        "openai-compatible",
+        "--api-base",
+        "https://legacy.example/v1",
+        "--api-key",
+        "sk-legacy",
+        "--model",
+        "gpt-image-2",
+        "--set-default",
+      ],
+      { encoding: "utf8", env: { ...process.env, CODEX_HOME: sandbox.codexHome } },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    assert.equal(JSON.parse(added.stdout).config.providers.legacy.model, "gpt-image-2");
+
+    const generated = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "repinned legacy",
+      "--out",
+      outPath,
+    ]);
+    assert.equal(generated.result.status, 0, generated.result.stderr);
+    assert.equal(generated.capture.body.model, "gpt-image-2");
+    assert.equal(generated.payload.model_resolution.source, "provider_pin");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli transparent generate sends native transparency requests through the routed model", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  writeOpenAiCaptureStub(sandbox.fetchStubPath, transparentPngBase64);
+  const outPath = path.join(sandbox.tempDir, "transparent.png");
+  // 指向必然失败的抠图脚本：只要生成路径还会调用本地抠图，本测试就会失败。
+  const backgroundRemoveStubPath = path.join(sandbox.tempDir, "background-remove-must-not-run.py");
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "local extraction must not run");
+  const run = (args: string[]) =>
+    runSandboxCli(sandbox, args, { GPT_IMAGE_2_BG_REMOVE_SCRIPT: backgroundRemoveStubPath });
+  try {
+    const { result, payload, capture } = run([
+      "transparent",
+      "generate",
+      "--prompt",
+      "tiny icon",
+      "--out",
+      outPath,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(payload.command, "transparent generate");
+    assert.equal(capture.url, "https://mock.example/v1/images/generations");
+    assert.equal(capture.body.background, "transparent");
+    assert.equal(capture.body.output_format, "png");
+    assert.equal(capture.body.model, "gpt-image-2.5-flare");
+    assert.equal(payload.transparency_mode, "upstream-native");
+    assert.equal(payload.request.background, "transparent");
+    assert.equal(payload.request.model, "gpt-image-2.5-flare");
+    assert.equal(payload.model_resolution.operation, "generate");
+    assert.equal(payload.model_resolution.resolved_model, "gpt-image-2.5-flare");
+    assert.equal(payload.verification.passed, true);
+    assert.equal(payload.output.path, outPath);
+    assert.equal("source" in payload, false);
+    assert.equal("attempts" in payload, false);
+    assert.equal("selected_strategy" in payload, false);
+
+    const escalatedOut = path.join(sandbox.tempDir, "transparent-precision.png");
+    const escalated = run([
+      "transparent",
+      "generate",
+      "--prompt",
+      "hero icon",
+      "--out",
+      escalatedOut,
+      "--tier",
+      "precision",
+    ]);
+    assert.equal(escalated.result.status, 0, escalated.result.stderr);
+    assert.equal(escalated.capture.body.model, "gpt-image-2.5-sunburst");
+    assert.equal(escalated.capture.body.background, "transparent");
+    assert.equal(escalated.payload.model_resolution.tier, "precision");
+    assert.equal(escalated.payload.model_resolution.tier_source, "explicit");
+    assert.equal(escalated.payload.request.model, "gpt-image-2.5-sunburst");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli codex commands keep the orchestrator model instead of routing to flare or sunburst", () => {
+  const sandbox = createCliSandbox({ codex: { type: "codex", credentials: {} } }, "codex");
+  writeCodexAuth(sandbox);
+  const codexStubPath = path.join(sandbox.tempDir, "codex-sse-stub.cjs");
+  writeCodexSseStub(codexStubPath);
+  const runCodex = (args: string[]) => {
+    const result = childProcess.spawnSync(
+      process.execPath,
+      ["--require", codexStubPath, cliBinPath(), "--json", ...args],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: sandbox.codexHome,
+          TEST_CAPTURE_FILE: sandbox.captureFile,
+        },
+      },
+    );
+    return {
+      result,
+      payload: JSON.parse(result.stdout || "null"),
+      capture: fs.existsSync(sandbox.captureFile)
+        ? JSON.parse(fs.readFileSync(sandbox.captureFile, "utf8"))
+        : null,
+    };
+  };
+  try {
+    const generated = runCodex([
+      "images",
+      "generate",
+      "--prompt",
+      "codex apple",
+      "--out",
+      path.join(sandbox.tempDir, "codex-generate.png"),
+      "--tier",
+      "precision",
+    ]);
+    assert.equal(generated.result.status, 0, generated.result.stderr);
+    assert.equal(generated.capture.body.model, "gpt-5.4");
+    assert.equal(generated.payload.model_resolution.resolved_model, "gpt-5.4");
+    assert.equal(generated.payload.model_resolution.delegated_to_server, true);
+    assert.equal(generated.payload.model_resolution.tier, "precision");
+
+    const overridden = runCodex([
+      "images",
+      "edit",
+      "--prompt",
+      "codex edit",
+      "--ref-image",
+      sandbox.refImagePath,
+      "--out",
+      path.join(sandbox.tempDir, "codex-edit.png"),
+      "--model",
+      "gpt-5.4-mini",
+    ]);
+    assert.equal(overridden.result.status, 0, overridden.result.stderr);
+    assert.equal(overridden.capture.body.model, "gpt-5.4-mini");
+    assert.equal(overridden.payload.model_resolution.source, "explicit_model");
+
+    const bodyFile = path.join(sandbox.tempDir, "codex-body.json");
+    fs.writeFileSync(
+      bodyFile,
+      JSON.stringify({ model: "gpt-5.4", stream: true, input: [], tools: [{ type: "image_generation" }] }),
+    );
+    const rawRequest = runCodex([
+      "request",
+      "create",
+      "--request-operation",
+      "responses",
+      "--body-file",
+      bodyFile,
+    ]);
+    assert.equal(rawRequest.result.status, 0, rawRequest.result.stderr);
+    assert.equal(rawRequest.capture.body.model, "gpt-5.4");
+    assert.equal(rawRequest.payload.request.model, "gpt-5.4");
+    assert.equal(rawRequest.payload.model_resolution.delegated_to_server, true);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
 test("config add-provider persists sanitized provider config", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
   const codexHome = path.join(tempDir, ".codex");
@@ -1881,89 +2711,188 @@ test("background remove supports multiple inputs through the merged CLI", () => 
   }
 });
 
-test("transparent generate produces a verified png through the local pipeline", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-image-2-skill-test-"));
-  const codexHome = path.join(tempDir, ".codex");
-  const configDir = path.join(codexHome, "gpt-image-2-skill");
-  const outPath = path.join(tempDir, "transparent.png");
-  const fetchStubPath = path.join(tempDir, "fetch-stub.cjs");
-  const backgroundRemoveStubPath = path.join(tempDir, "background-remove-success.py");
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(configDir, "config.json"),
-    JSON.stringify({
-      version: 1,
-      default_provider: "mock",
-      providers: {
-        mock: {
-          type: "openai-compatible",
-          api_base: "https://mock.example/v1",
-          model: "gpt-image-2",
-          supports_n: true,
-          credentials: {
-            api_key: { source: "file", value: "sk-test" },
-          },
-        },
-      },
-    }),
-  );
-  fs.writeFileSync(
-    fetchStubPath,
-    `
-globalThis.fetch = async () => new Response(JSON.stringify({
-  created: 1,
-  data: [{ b64_json: ${JSON.stringify(
-    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==",
-  )} }]
-}), {
-  status: 200,
-  headers: { "Content-Type": "application/json" }
-});
-`,
-  );
-  writeBackgroundRemoveSuccessStub(
-    backgroundRemoveStubPath,
-    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHElEQVR4nGNgoBQwwhj/wQhFAizHRMgEyhVQDgB71QIIdIAIkgAAAABJRU5ErkJggg==",
-  );
+test("transparent generate writes the upstream native PNG with real alpha", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  writeOpenAiCaptureStub(sandbox.fetchStubPath, transparentPngBase64);
+  const outPath = path.join(sandbox.tempDir, "native-transparent.png");
+  const backgroundRemoveStubPath = path.join(sandbox.tempDir, "background-remove-must-not-run.py");
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "local extraction must not run");
   try {
-    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "gpt_image_2_skill.cjs");
-    const result = childProcess.spawnSync(
-      process.execPath,
-      [
-        "--require",
-        fetchStubPath,
-        cliPath,
-        "--json",
+    const { result, payload, capture } = runSandboxCli(
+      sandbox,
+      ["transparent", "generate", "--prompt", "tiny icon", "--out", outPath],
+      { GPT_IMAGE_2_BG_REMOVE_SCRIPT: backgroundRemoveStubPath },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(capture.body.background, "transparent");
+    assert.equal(payload.output.path, outPath);
+    assert.equal(payload.verification.input_has_alpha, true);
+    assert.equal(payload.verification.passed, true);
+    const png = readPng(outPath);
+    const alphas = Array.from({ length: png.data.length / 4 }, (_, index) => png.data[index * 4 + 3]);
+    assert.ok(alphas.some((alpha) => alpha === 0), "upstream PNG keeps fully transparent pixels");
+    assert.ok(alphas.some((alpha) => alpha === 255), "upstream PNG keeps an opaque subject core");
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli transparent generate fails verification with extraction guidance when upstream ignores transparency", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  const opaquePngPath = path.join(sandbox.tempDir, "opaque.png");
+  writeRgbPngWithoutAlpha(opaquePngPath);
+  writeOpenAiCaptureStub(sandbox.fetchStubPath, fs.readFileSync(opaquePngPath).toString("base64"));
+  const outPath = path.join(sandbox.tempDir, "opaque-out.png");
+  const backgroundRemoveStubPath = path.join(sandbox.tempDir, "background-remove-must-not-run.py");
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "local extraction must not run");
+  try {
+    const { result, payload } = runSandboxCli(
+      sandbox,
+      ["transparent", "generate", "--prompt", "opaque icon", "--out", outPath],
+      { GPT_IMAGE_2_BG_REMOVE_SCRIPT: backgroundRemoveStubPath },
+    );
+    assert.equal(result.status, 1);
+    assert.equal(payload.error.code, "transparent_verification_failed");
+    assert.match(payload.error.message, /transparent extract/);
+    assert.equal(payload.error.detail.output, outPath);
+    assert.equal(payload.error.detail.verification.passed, false);
+    assert.equal(fs.existsSync(outPath), true);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli transparent generate rejects removed matte-extraction flags with migration guidance", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  try {
+    for (const removedFlag of [
+      ["--method", "chroma"],
+      ["--material", "glow"],
+      ["--matte-color", "magenta"],
+      ["--source-prompt", "custom source"],
+      ["--source-out", path.join(sandbox.tempDir, "source.png")],
+      ["--report-dir", path.join(sandbox.tempDir, "report")],
+      ["--keep-sources"],
+      ["--threshold", "20"],
+      ["--softness", "30"],
+      ["--spill-suppression", "0.5"],
+    ]) {
+      const { result, payload, capture } = runSandboxCli(sandbox, [
         "transparent",
         "generate",
         "--prompt",
         "tiny icon",
         "--out",
-        outPath,
-      ],
+        path.join(sandbox.tempDir, "rejected.png"),
+        ...removedFlag,
+      ]);
+      assert.equal(result.status, 1, `${removedFlag[0]} should be rejected`);
+      assert.equal(payload.error.code, "unsupported_option", removedFlag[0]);
+      assert.match(payload.error.message, /transparent extract/, removedFlag[0]);
+      assert.equal(capture, null, `${removedFlag[0]} must not reach the network`);
+    }
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli transparent generate delegates native transparency to codex image_generation", () => {
+  const sandbox = createCliSandbox({ codex: { type: "codex", credentials: {} } }, "codex");
+  writeCodexAuth(sandbox);
+  const codexStubPath = path.join(sandbox.tempDir, "codex-transparent-stub.cjs");
+  writeCodexSseStub(codexStubPath, transparentPngBase64);
+  const outPath = path.join(sandbox.tempDir, "codex-native.png");
+  const backgroundRemoveStubPath = path.join(sandbox.tempDir, "background-remove-must-not-run.py");
+  writeBackgroundRemoveFailureStub(backgroundRemoveStubPath, "local extraction must not run");
+  try {
+    const result = childProcess.spawnSync(
+      process.execPath,
+      ["--require", codexStubPath, cliBinPath(), "--json", "transparent", "generate", "--prompt", "codex icon", "--out", outPath],
       {
         encoding: "utf8",
         env: {
           ...process.env,
-          CODEX_HOME: codexHome,
+          CODEX_HOME: sandbox.codexHome,
+          TEST_CAPTURE_FILE: sandbox.captureFile,
           GPT_IMAGE_2_BG_REMOVE_SCRIPT: backgroundRemoveStubPath,
         },
       },
     );
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
-    assert.equal(payload.command, "transparent generate");
-    assert.equal(payload.selected_strategy, "background-remove");
-    assert.equal(payload.request.final_background_intent, "transparent");
-    assert.equal(payload.request.selected_matte_color, "#000000");
-    assert.equal(payload.request.intermediate_extraction_background.selected_matte_color, "#000000");
-    assert.equal(payload.source.attempts[0].matte_color, "#000000");
-    assert.equal(payload.attempts[0].strategy, "background-remove");
-    assert.equal(payload.attempts[0].selected, true);
+    const capture = JSON.parse(fs.readFileSync(sandbox.captureFile, "utf8"));
+    assert.equal(payload.transparency_mode, "upstream-native");
+    assert.equal(payload.model_resolution.delegated_to_server, true);
+    assert.equal(capture.body.model, "gpt-5.4");
+    assert.equal(capture.body.tools[0].background, "transparent");
+    assert.equal(capture.body.tools[0].output_format, "png");
     assert.equal(payload.verification.passed, true);
     assert.ok(fs.statSync(outPath).size > 0);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli transparent generate keeps --profile for the delivery verification gate", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  writeOpenAiCaptureStub(sandbox.fetchStubPath, transparentPngBase64);
+  const outPath = path.join(sandbox.tempDir, "profile-transparent.png");
+  try {
+    const { result, payload, capture } = runSandboxCli(sandbox, [
+      "transparent",
+      "generate",
+      "--prompt",
+      "tiny icon",
+      "--out",
+      outPath,
+      "--profile",
+      "icon",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(capture.body.background, "transparent");
+    assert.equal(payload.transparency_mode, "upstream-native");
+    assert.equal(payload.request.profile, "icon");
+    assert.equal(payload.verification.profile, "icon");
+    assert.equal(payload.verification.passed, true);
+    assert.equal(payload.output.path, outPath);
+  } finally {
+    removeCliSandbox(sandbox);
+  }
+});
+
+test("cli images rejects an empty --model value instead of silently routing", () => {
+  const sandbox = createCliSandbox({ mock: mockOpenAiProvider() }, "mock");
+  try {
+    const blank = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "blank model",
+      "--out",
+      path.join(sandbox.tempDir, "blank.png"),
+      "--model",
+      "   ",
+    ]);
+    assert.equal(blank.result.status, 1);
+    assert.equal(blank.payload.error.code, "invalid_argument");
+    assert.match(blank.payload.error.message, /--model/);
+    assert.equal(blank.capture, null);
+
+    const missing = runSandboxCli(sandbox, [
+      "images",
+      "generate",
+      "--prompt",
+      "missing model",
+      "--out",
+      path.join(sandbox.tempDir, "missing.png"),
+      "--model",
+    ]);
+    assert.equal(missing.result.status, 1);
+    assert.equal(missing.payload.error.code, "invalid_argument");
+    assert.match(missing.payload.error.message, /--model/);
+    assert.equal(missing.capture, null);
+  } finally {
+    removeCliSandbox(sandbox);
   }
 });
 

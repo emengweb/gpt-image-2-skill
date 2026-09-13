@@ -6,19 +6,19 @@ Use this reference when the user asks for a final transparent-background PNG. Th
 
 | Command | Role |
 |---|---|
-| `transparent generate` | Prompt-to-final PNG. Generates one controlled matte source, tries integrated `background-remove` first, falls back to local chroma extraction when needed, verifies, and fails if the final PNG is not usable. |
+| `transparent generate` | Prompt-to-final PNG. Sends native `background: transparent` with PNG output in one request, verifies alpha, and fails if the final PNG is not usable. |
 | `transparent extract` | Local alpha extraction with integrated `background-remove` first and built-in chroma/dual fallback. Use this for difficult assets, custom source prompts, arbitrary-photo cutouts, or multi-background flows. |
 | `transparent verify` | Final acceptance gate. Use `--strict` with the right `--profile` before delivery. |
 
-Do not treat provider-native `--background transparent` as the reliable path, especially with Codex. Controlled backgrounds plus local extraction are the reliable path.
+`transparent generate` 优先使用 provider 原生 `background: transparent`。OpenAI 兼容服务若忽略该参数，会在最终 alpha 校验时失败；此时对已有 RGB 图片使用 `transparent extract`。Codex 的透明能力由服务端 `image_generation` 委托，不能假设其一定支持该参数。
 
 A transparent deliverable is valid only if the final file has a real PNG alpha channel and passes quality verification. Visual transparency, white backgrounds, and checkerboard patterns are not sufficient.
 
 ## Default loop
 
-1. Start with `transparent generate` for ordinary isolated assets; it will prefer integrated `background-remove` and only fall back when needed.
-2. If verification fails, keep sources with `--report-dir` and inspect the source matte plus the JSON `attempts`.
-3. Change the matte color or source prompt, then call `transparent extract --method auto`; prefer `--matte-color auto` for AI-generated flat backgrounds when the fallback chroma path is likely to help.
+1. Start with `transparent generate` for prompt-to-final assets; it sends one native transparent request and verifies the returned PNG.
+2. If verification fails, inspect the provider response and switch to `transparent extract` only when you have an existing RGB source image.
+3. Use `transparent extract --method auto` for arbitrary-photo cutouts or controlled matte sources; prefer `--matte-color auto` for AI-generated flat backgrounds.
 4. For translucency or glow, create black and white variants and use dual extraction.
 5. Run `transparent verify --profile <profile> --strict` on the final PNG. If the PNG came from chroma extraction, include `--expected-matte-color <matte>`.
 6. Deliver only the verified PNG unless the user asked for diagnostics.
@@ -71,7 +71,7 @@ Render on a perfectly flat pure magenta background. No shadows, gradients, textu
 
 ### Opaque entities
 
-Use a single chroma matte. The runtime will still try `background-remove` first, then reuse the matte through chroma fallback if that path verifies better.
+对于提示词生成的最终透明图，使用 `transparent generate` 的原生透明请求。只有已有 RGB 图片或需要受控底图时，才使用 `transparent extract` 的 chroma/rembg 流程。
 
 ```bash
 node scripts/gpt_image_2_skill.cjs --json --json-events \

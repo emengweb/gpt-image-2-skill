@@ -90,6 +90,7 @@ export async function runCodexImageCommand(input: {
   prompt: string;
   out: string;
   instructions?: string;
+  model?: string;
   refImages?: string[];
   background?: string;
   size?: string;
@@ -103,7 +104,7 @@ export async function runCodexImageCommand(input: {
   const userAgent = resolveUserAgent(readConfig());
   const body = buildCodexImageBody({
     prompt: input.prompt,
-    model: input.provider.model || DEFAULT_CODEX_MODEL,
+    model: input.model || input.provider.model || DEFAULT_CODEX_MODEL,
     instructions: input.instructions || DEFAULT_INSTRUCTIONS,
     refImages: resolveRefImages(input.refImages ?? []),
     background: input.background || "auto",

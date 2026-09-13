@@ -3,7 +3,12 @@ export const DEFAULT_OPENAI_API_BASE = "https://api.openai.com/v1";
 export const OPENAI_GENERATIONS_PATH = "/images/generations";
 export const OPENAI_EDITS_PATH = "/images/edits";
 export const DEFAULT_CODEX_MODEL = "gpt-5.4";
-export const DEFAULT_OPENAI_MODEL = "gpt-image-2";
+// 速度优先模型：默认生图档位，用于日常出图、SNS、网页素材与批量生成。
+export const DEFAULT_OPENAI_MODEL = "gpt-image-2.5-flare";
+// 精度优先模型：默认编辑档位，用于基于已有图的调整、多轮精修与最终交付。
+export const DEFAULT_OPENAI_EDIT_MODEL = "gpt-image-2.5-sunburst";
+// 上一代默认模型，仅用于识别历史配置里的固定值并在读取时迁移到路由默认。
+export const LEGACY_OPENAI_MODEL = "gpt-image-2";
 export const DEFAULT_INSTRUCTIONS = "You are a concise assistant.";
 export const DEFAULT_USER_AGENT = "OpenAI/JS 4.96.0";
 export const DEFAULT_RETRY_COUNT = 3;

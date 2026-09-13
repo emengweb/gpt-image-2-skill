@@ -7,13 +7,16 @@ import {
   DEFAULT_CODEX_ENDPOINT,
   DEFAULT_CODEX_MODEL,
   DEFAULT_OPENAI_API_BASE,
-  DEFAULT_OPENAI_MODEL,
   DEFAULT_USER_AGENT,
+  LEGACY_OPENAI_MODEL,
   OPENAI_API_KEY_ENV,
 } from "./constants.ts";
 import type { AppConfig, ProviderConfig, ProviderSelection } from "./types.ts";
 
-const DEFAULT_CONFIG_VERSION = 1;
+// 配置版本 2 引入“模型档位路由”：版本 1 里自动写入的旧默认模型固定值会被迁移清除；
+// 版本 2 起用户显式固定的 model 会被保留，因此用 --model gpt-image-2 重新固定是有效的。
+const DEFAULT_CONFIG_VERSION = 2;
+const MODEL_ROUTING_CONFIG_VERSION = 2;
 
 export function codexHome() {
   return process.env.CODEX_HOME
@@ -30,13 +33,25 @@ export function authPath() {
 }
 
 export function readConfig(): AppConfig {
+  return readConfigWithMigrations().config;
+}
+
+// 同时返回被迁移掉的旧模型固定值，供 doctor 提示受影响的自定义 provider。
+export function readConfigWithMigrations(): { config: AppConfig; legacy_model_pins: string[] } {
   const target = configPath();
   if (!fs.existsSync(target)) {
-    return defaultConfig();
+    return { config: defaultConfig(), legacy_model_pins: [] };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(target, "utf8")) as AppConfig;
-    return normalizeConfig(parsed);
+    return {
+      config: normalizeConfig(parsed),
+      legacy_model_pins: needsModelRoutingMigration(parsed)
+        ? Object.entries(parsed.providers ?? {})
+            .filter(([, provider]) => provider?.model?.trim() === LEGACY_OPENAI_MODEL)
+            .map(([name]) => name)
+        : [],
+    };
   } catch (error) {
     throw new CliError("invalid_body_json", "配置文件不是有效 JSON。", {
       path: target,
@@ -52,6 +67,7 @@ export function saveConfig(config: AppConfig) {
 }
 
 export function normalizeConfig(config: Partial<AppConfig> | undefined): AppConfig {
+  const providers = config?.providers ?? {};
   return {
     version: DEFAULT_CONFIG_VERSION,
     default_provider: config?.default_provider,
@@ -59,8 +75,27 @@ export function normalizeConfig(config: Partial<AppConfig> | undefined): AppConf
       typeof config?.user_agent === "string" && config.user_agent.trim()
         ? config.user_agent.trim()
         : undefined,
-    providers: config?.providers ?? {},
+    providers: needsModelRoutingMigration(config)
+      ? Object.fromEntries(
+          Object.entries(providers).map(([name, provider]) => [name, migrateProvider(provider)]),
+        )
+      : providers,
   };
+}
+
+// 只对版本 1（或缺失版本号）的旧配置做一次性迁移；此后的显式固定值一律保留。
+function needsModelRoutingMigration(config: Partial<AppConfig> | undefined) {
+  const version = typeof config?.version === "number" ? config.version : 1;
+  return version < MODEL_ROUTING_CONFIG_VERSION;
+}
+
+// 历史配置里的旧默认模型是运行时自动写入的，会遮蔽模型档位路由；
+// 迁移时清理为“未固定”，需要旧模型的用户应显式传 --model gpt-image-2。
+function migrateProvider(provider: ProviderConfig): ProviderConfig {
+  if (provider.model?.trim() !== LEGACY_OPENAI_MODEL) return provider;
+  const migrated = { ...provider };
+  delete migrated.model;
+  return migrated;
 }
 
 export function defaultConfig(): AppConfig {
@@ -69,7 +104,6 @@ export function defaultConfig(): AppConfig {
     providers.openai = {
       type: "openai",
       api_base: process.env.OPENAI_API_BASE?.trim() || DEFAULT_OPENAI_API_BASE,
-      model: DEFAULT_OPENAI_MODEL,
       stream: false,
       supports_n: true,
       edit_region_mode: "native-mask",
@@ -181,7 +215,6 @@ export function resolveProvider(config: AppConfig, providerName: string): Provid
       config.providers.openai ?? {
         type: "openai",
         api_base: process.env.OPENAI_API_BASE?.trim() || DEFAULT_OPENAI_API_BASE,
-        model: DEFAULT_OPENAI_MODEL,
         stream: false,
         supports_n: true,
         edit_region_mode: "native-mask",

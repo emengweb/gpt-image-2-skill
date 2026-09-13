@@ -45,9 +45,19 @@ Common `code` values:
   "retry_policy": {
     "max_retries": 3,
     "base_delay_seconds": 1
+  },
+  "model_routing": {
+    "generate": "gpt-image-2.5-flare",
+    "edit": "gpt-image-2.5-sunburst",
+    "legacy_openai_model": "gpt-image-2",
+    "tiers": ["speed", "precision"],
+    "resolution_order": ["--model", "--tier", "provider_config_model", "operation_default"],
+    "legacy_model_pins": ["my-image-api"]
   }
 }
 ```
+
+`model_routing.legacy_model_pins` lists providers whose `model: "gpt-image-2"` pin was dropped by the one-time version-1 → version-2 config migration, so you can see which custom endpoints now receive the new default model names.
 
 ### `auth inspect`
 
@@ -184,15 +194,32 @@ Pass `background init --install` when you want the runtime to explicitly install
 {
   "ok": true,
   "provider_selection": { "resolved": "openai" },
-  "request": { "model": "gpt-image-2", "size": "2048x2048", "...": "..." },
+  "model_resolution": {
+    "operation": "generate",
+    "tier": "speed",
+    "tier_source": "operation_default",
+    "requested_model": null,
+    "provider_model": null,
+    "resolved_model": "gpt-image-2.5-flare",
+    "source": "operation_default",
+    "delegated_to_server": false,
+    "reason": "Default generate model: speed-first model for high-frequency and low-cost generation."
+  },
+  "request": { "model": "gpt-image-2.5-flare", "size": "2048x2048", "...": "..." },
   "retry": { "count": 0, "max_retries": 3 },
   "data": { "...": "image metadata + saved file path" }
 }
 ```
 
+`model_resolution.source` is one of `explicit_model` (`--model`), `explicit_tier` (`--tier`), `provider_pin` (config `model`), `operation_default`, or `codex_default`. Under `--provider codex`, `delegated_to_server` is `true`, `resolved_model` is the orchestrator model, and the image model is chosen by the server.
+
 ### `images edit` (OpenAI multipart)
 
-Same envelope as `images generate`. The `request` object includes `operation: "edit"` and `ref_image_count: <N>` instead of size hints. Multipart transport is reported in **stderr** as the `multipart_prepared` progress event (`type: "multipart_prepared"`), not on stdout. Token usage in `response.usage` splits into `input_tokens_details.image_tokens` and `text_tokens` for edits.
+Same envelope as `images generate`. The `request` object includes `operation: "edit"` and `ref_image_count: <N>` instead of size hints. Reference-image edits default to `gpt-image-2.5-sunburst` (`model_resolution.source: "operation_default"`). Multipart transport is reported in **stderr** as the `multipart_prepared` progress event (`type: "multipart_prepared"`), not on stdout. Token usage in `response.usage` splits into `input_tokens_details.image_tokens` and `text_tokens` for edits.
+
+### `transparent generate`
+
+`transparent generate` adds `model_resolution`, `request.model`, `request.background: "transparent"` and `transparency_mode: "upstream-native"`. It sends one native transparent request and performs only final alpha verification.
 
 ### `request create`
 
@@ -207,6 +234,8 @@ Returns the raw upstream JSON wrapped in the standard envelope:
 
 When `--expect-image` is set, the runtime decodes the first image payload into `--out-image` and adds `image_path` to `data`.
 
+A `model` inside the body file is authoritative (`model_resolution.source: "explicit_model"`). When the body omits `model`, the runtime injects the routed default for `--request-operation generate` / `edit` and reports it in `model_resolution`.
+
 ### `transparent generate`
 
 Returns the final verified transparent PNG. The command fails with `transparent_verification_failed` if the final file does not pass the built-in gate.
@@ -215,9 +244,43 @@ Returns the final verified transparent PNG. The command fails with `transparent_
 {
   "ok": true,
   "command": "transparent generate",
-  "provider": "codex",
+  "provider": "openai",
+  "transparency_mode": "upstream-native",
+  "model_resolution": {
+    "operation": "generate",
+    "tier": "speed",
+    "resolved_model": "gpt-5.4",
+    "delegated_to_server": true,
+    "...": "..."
+  },
   "request": {
     "prompt": "...",
+    "model": "gpt-5.4",
+    "background": "transparent",
+    "output_format": "png"
+  },
+  "generation": { "...": "upstream images payload" },
+  "verification": {
+    "passed": true,
+    "profile": "generic",
+    "is_png": true,
+    "has_alpha": true,
+    "input_has_alpha": true,
+    "alpha_min": 0,
+    "alpha_max": 255,
+    "transparent_ratio": 0.42,
+    "warnings": []
+  },
+  "output": {
+    "path": "/tmp/asset.png",
+    "bytes": 123456,
+    "files": [{ "index": 0, "path": "/tmp/asset.png", "bytes": 123456 }]
+  }
+}
+```
+
+<!-- 原生透明生成不返回 source/extraction/attempts；以下示例属于旧版本，仅保留 extract 字段说明。 -->
+<!--
     "source_prompt": "...",
     "final_background_intent": "transparent",
     "intermediate_extraction_background": {
@@ -290,6 +353,7 @@ Returns the final verified transparent PNG. The command fails with `transparent_
   }
 }
 ```
+-->
 
 ### `transparent extract`
 
@@ -329,7 +393,7 @@ Runs local extraction only. Use `--strict` when the command should fail if verif
 }
 ```
 
-`selected_strategy` tells you which path produced the final file: `background-remove`, `chroma`, or `dual`. `attempts` summarizes every tried path in order so agents can tell when the runtime fell back. For `transparent generate`, the `request.intermediate_extraction_background` object records the deterministic matte choice, the rule bucket, and any retry candidates.
+`selected_strategy` tells you which local extraction path produced the final file: `background-remove`, `chroma`, or `dual`. `attempts` summarizes those extraction attempts and applies to `transparent extract`; native `transparent generate` reports `transparency_mode`, `request.background`, `generation`, and final `verification` instead.
 
 Method semantics:
 

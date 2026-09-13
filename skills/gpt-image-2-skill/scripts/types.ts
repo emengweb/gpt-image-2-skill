@@ -27,7 +27,7 @@ export interface ProviderConfig {
 }
 
 export interface AppConfig {
-  version: 1;
+  version: number;
   default_provider?: string;
   user_agent?: string;
   providers: Record<string, ProviderConfig>;

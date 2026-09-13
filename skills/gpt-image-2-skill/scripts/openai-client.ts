@@ -9,6 +9,8 @@ import { readConfig, resolveUserAgent } from "./config-store.ts";
 import { buildUserAgentHeaders } from "./request-headers.ts";
 import {
   DEFAULT_OPENAI_API_BASE,
+  DEFAULT_OPENAI_EDIT_MODEL,
+  DEFAULT_OPENAI_MODEL,
   DEFAULT_REQUEST_TIMEOUT_MS,
   OPENAI_EDITS_PATH,
   OPENAI_GENERATIONS_PATH,
@@ -18,6 +20,7 @@ export interface GenerateOptions {
   prompt: string;
   out: string;
   previewOut?: string;
+  model?: string;
   size?: string;
   sizeResolution?: ImageSizeResolution | null;
   quality?: string;
@@ -64,7 +67,7 @@ type VendorTopLevelImageEvent = OpenAiPayload & {
 
 export function buildGenerateBody(provider: ProviderConfig, options: GenerateOptions) {
   const body: Record<string, unknown> = {
-    model: provider.model || "gpt-image-2",
+    model: options.model || provider.model || DEFAULT_OPENAI_MODEL,
     prompt: options.prompt,
     response_format: options.responseFormat ?? "b64_json",
     stream: options.stream ?? provider.stream ?? false,
@@ -115,8 +118,9 @@ export async function requestEdit(
   events: JsonEventWriter,
 ) {
   const endpoint = buildOpenAiOperationEndpoint(provider, "edit");
+  const model = options.model || provider.model || DEFAULT_OPENAI_EDIT_MODEL;
   const body: Record<string, unknown> = {
-    model: provider.model || "gpt-image-2",
+    model,
     prompt: options.prompt,
     response_format: options.responseFormat ?? "b64_json",
     stream: options.stream ?? provider.stream ?? false,
@@ -146,7 +150,7 @@ export async function requestEdit(
     files: result.files,
     previewFiles: result.previewFiles,
     requestBody: {
-      model: provider.model || "gpt-image-2",
+      model,
       prompt: options.prompt,
       response_format: options.responseFormat ?? "b64_json",
       stream: options.stream ?? provider.stream ?? false,
@@ -162,6 +166,7 @@ export async function requestCreateOpenAi(input: {
   apiKey: string;
   operation: "generate" | "edit";
   body: Record<string, unknown>;
+  model?: string;
   sizeResolution?: ImageSizeResolution | null;
   outImage?: string;
   previewOutImage?: string;
@@ -169,11 +174,13 @@ export async function requestCreateOpenAi(input: {
   events: JsonEventWriter;
 }) {
   const normalizedBody = normalizeImageSizeInBody(input.body);
+  // body 里的 model 优先（短名别名会被展开），缺省时补上路由解析结果。
+  const requestBody = input.model ? { ...normalizedBody.body, model: input.model } : normalizedBody.body;
   const result = await executeOpenAi({
     endpoint: buildOpenAiOperationEndpoint(input.provider, input.operation),
     apiKey: input.apiKey,
     operation: input.operation,
-    body: normalizedBody.body,
+    body: requestBody,
     providerName:
       input.provider.type === "openai-compatible" ? "openai-compatible" : "openai",
     events: input.events,

@@ -12,8 +12,10 @@ import type { JsonError } from "./types.ts";
 import {
   DEFAULT_CODEX_ENDPOINT,
   DEFAULT_CODEX_MODEL,
+  DEFAULT_OPENAI_EDIT_MODEL,
   DEFAULT_OPENAI_MODEL,
   DEFAULT_RETRY_COUNT,
+  LEGACY_OPENAI_MODEL,
   OPENAI_API_KEY_ENV,
 } from "./constants.ts";
 import {
@@ -21,6 +23,7 @@ import {
   checkEndpointReachability,
   configPath,
   readConfig,
+  readConfigWithMigrations,
   resolveApiKey,
   resolveProvider,
   resolveProviderName,
@@ -37,6 +40,7 @@ import {
 } from "./openai-client.ts";
 import type { ImageSizeResolution } from "./image-size.ts";
 import { normalizeImageSizeInBody, resolveImageSize } from "./image-size.ts";
+import { MODEL_TIER_ORDER, normalizeTier, resolveRequestModel } from "./model-routing.ts";
 import type { ProviderKind } from "./types.ts";
 import {
   runTransparentExtract,
@@ -196,9 +200,8 @@ async function handleConfig(command?: string, rest: string[] = []) {
       type: providerType,
       api_base: args.apiBase,
       endpoint: args.endpoint,
-      model:
-        args.model ||
-        (providerType === "codex" ? DEFAULT_CODEX_MODEL : DEFAULT_OPENAI_MODEL),
+      // 未显式指定 model 时不固定模型，交给生图/编辑档位路由决定。
+      model: args.model || (providerType === "codex" ? DEFAULT_CODEX_MODEL : undefined),
       stream: args.stream,
       supports_n: args.supportsN ? true : args.noSupportsN ? false : undefined,
       edit_region_mode: args.editRegionMode as "native-mask" | "reference-hint" | "none" | undefined,
@@ -264,7 +267,7 @@ function handleDoctor(rest: string[], globalProvider?: string) {
   if (rest.length) {
     throw new CliError("invalid_command", `Unexpected doctor args: ${rest.join(" ")}`);
   }
-  const config = readConfig();
+  const { config, legacy_model_pins: legacyModelPins } = readConfigWithMigrations();
   const auth = handleAuth("inspect") as ReturnType<typeof handleAuth>;
   const background = inspectBackgroundRemoveEnvironment();
   return {
@@ -274,6 +277,14 @@ function handleDoctor(rest: string[], globalProvider?: string) {
     retry_policy: {
       max_retries: DEFAULT_RETRY_COUNT,
       base_delay_seconds: 1,
+    },
+    model_routing: {
+      generate: DEFAULT_OPENAI_MODEL,
+      edit: DEFAULT_OPENAI_EDIT_MODEL,
+      legacy_openai_model: LEGACY_OPENAI_MODEL,
+      tiers: MODEL_TIER_ORDER,
+      resolution_order: ["--model", "--tier", "provider_config_model", "operation_default"],
+      legacy_model_pins: legacyModelPins,
     },
     config_file: configPath(),
     background_remove: {
@@ -384,6 +395,13 @@ async function handleImages(
   );
   const providerName = providerSelection.resolved;
   const provider = resolveProvider(config, providerName);
+  const modelResolution = resolveRequestModel({
+    providerType: provider.type,
+    operation: command,
+    providerModel: provider.model,
+    requestedModel: options.model,
+    requestedTier: options.tier,
+  });
 
   if (provider.type === "codex") {
     const result = await runCodexImageCommand({
@@ -393,6 +411,7 @@ async function handleImages(
       prompt: options.prompt,
       out: options.out,
       instructions: options.instructions,
+      model: modelResolution.resolved_model,
       refImages: options.refImages,
       background: options.background,
       size: options.size,
@@ -406,6 +425,7 @@ async function handleImages(
       ok: true,
       command: `images ${command}`,
       provider_selection: providerSelection,
+      model_resolution: modelResolution,
       request: {
         operation: command,
         ...result.requestBody,
@@ -438,6 +458,7 @@ async function handleImages(
         prompt: options.prompt,
         out: options.out,
         previewOut: options.previewOut,
+        model: modelResolution.resolved_model,
         size: options.size,
         sizeResolution: options.sizeResolution,
         quality: options.quality,
@@ -455,6 +476,7 @@ async function handleImages(
       ok: true,
       command: "images generate",
       provider_selection: providerSelection,
+      model_resolution: modelResolution,
       request: {
         operation: "generate",
         ...result.requestBody,
@@ -476,6 +498,7 @@ async function handleImages(
       prompt: options.prompt,
       out: options.out,
       previewOut: options.previewOut,
+      model: modelResolution.resolved_model,
       size: options.size,
       sizeResolution: options.sizeResolution,
       quality: options.quality,
@@ -495,6 +518,7 @@ async function handleImages(
     ok: true,
     command: "images edit",
     provider_selection: providerSelection,
+    model_resolution: modelResolution,
     request: {
       operation: "edit",
       ...result.requestBody,
@@ -547,14 +571,23 @@ async function handleRequest(
       expectImage: args.expectImage,
       events,
     });
+    const bodyModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : null;
     return {
       ok: true,
       command: "request create",
       provider: providerName,
       provider_selection: providerSelection,
+      // Codex 的请求模型是编排模型，图片模型由服务端决定，body 原样透传不做注入。
+      model_resolution: resolveRequestModel({
+        providerType: provider.type,
+        operation: "generate",
+        providerModel: provider.model,
+        requestedModel: bodyModel ?? undefined,
+      }),
       request: {
         operation: "responses",
         body_file: args.bodyFile,
+        model: bodyModel,
       },
       ...(normalizedBody.sizeResolution?.changed
         ? { size_normalization: normalizedBody.sizeResolution }
@@ -576,12 +609,20 @@ async function handleRequest(
   if (args.requestOperation !== "generate" && args.requestOperation !== "edit") {
     throw new CliError("unsupported_option", "OpenAI request create uses --request-operation generate or edit.");
   }
+  const bodyModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : null;
+  const modelResolution = resolveRequestModel({
+    providerType: provider.type,
+    operation: args.requestOperation,
+    providerModel: provider.model,
+    requestedModel: bodyModel ?? undefined,
+  });
   const apiKey = resolveApiKey(provider, args.apiKey);
   const result = await requestCreateOpenAi({
     provider,
     apiKey,
     operation: args.requestOperation,
     body: normalizedBody.body,
+    model: modelResolution.resolved_model,
     sizeResolution: normalizedBody.sizeResolution,
     outImage: args.outImage,
     previewOutImage: args.previewOutImage,
@@ -593,10 +634,11 @@ async function handleRequest(
     command: "request create",
     provider: providerName,
     provider_selection: providerSelection,
+    model_resolution: modelResolution,
     request: {
       operation: args.requestOperation,
       body_file: args.bodyFile,
-      model: body.model ?? null,
+      model: modelResolution.resolved_model,
     },
     ...(normalizedBody.sizeResolution?.changed
       ? { size_normalization: normalizedBody.sizeResolution }
@@ -634,12 +676,20 @@ async function handleTransparent(
     );
     const providerName = providerSelection.resolved;
     const provider = resolveProvider(config, providerName);
+    const modelResolution = resolveRequestModel({
+      providerType: provider.type,
+      operation: "generate",
+      providerModel: provider.model,
+      requestedModel: args.model,
+      requestedTier: args.tier,
+    });
     return runTransparentGenerate({
       providerName,
       provider,
       prompt: args.prompt,
       out: args.out,
       instructions: args.instructions,
+      modelResolution,
       size: args.size,
       sizeResolution: args.sizeResolution,
       quality: args.quality,
@@ -672,6 +722,8 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
     prompt: "",
     out: "",
     previewOut: undefined as string | undefined,
+    model: undefined as string | undefined,
+    tier: undefined as string | undefined,
     size: undefined as string | undefined,
     sizeResolution: null as ImageSizeResolution | null,
     quality: undefined as string | undefined,
@@ -710,6 +762,17 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
         break;
       case "--preview-out":
         state.previewOut = value;
+        i += 1;
+        break;
+      case "--model":
+        if (value === undefined || !value.trim()) {
+          throw new CliError("invalid_argument", "--model must not be empty.");
+        }
+        state.model = value;
+        i += 1;
+        break;
+      case "--tier":
+        state.tier = parseTierFlag(value, `images ${command}`);
         i += 1;
         break;
       case "--size":
@@ -755,6 +818,9 @@ function parseImageArgs(rest: string[], command: "generate" | "edit") {
       default:
         throw new CliError("invalid_command", `Unknown argument: ${arg}`);
     }
+  }
+  if (state.model !== undefined && !state.model.trim()) {
+    throw new CliError("invalid_argument", "--model must not be empty.");
   }
   if (!state.prompt) throw new CliError("invalid_command", "Missing required --prompt.");
   if (!state.out) throw new CliError("invalid_command", "Missing required --out.");
@@ -883,6 +949,8 @@ function parseTransparentGenerateArgs(rest: string[]) {
     prompt: "",
     out: "",
     instructions: undefined as string | undefined,
+    model: undefined as string | undefined,
+    tier: undefined as string | undefined,
     size: undefined as string | undefined,
     sizeResolution: null as ImageSizeResolution | null,
     quality: undefined as string | undefined,
@@ -923,6 +991,17 @@ function parseTransparentGenerateArgs(rest: string[]) {
         break;
       case "--instructions":
         state.instructions = value;
+        i += 1;
+        break;
+      case "--model":
+        if (value === undefined || !value.trim()) {
+          throw new CliError("invalid_argument", "--model must not be empty.");
+        }
+        state.model = value;
+        i += 1;
+        break;
+      case "--tier":
+        state.tier = parseTierFlag(value, "transparent generate");
         i += 1;
         break;
       case "--size":
@@ -999,6 +1078,15 @@ function parseTransparentGenerateArgs(rest: string[]) {
   if (!state.prompt) throw new CliError("invalid_command", "Missing required --prompt.");
   if (!state.out) throw new CliError("invalid_command", "Missing required --out.");
   return state;
+}
+
+function parseTierFlag(value: string | undefined, commandLabel: string) {
+  if (value === undefined || value === "auto") return undefined;
+  const tier = normalizeTier(value);
+  if (!tier) {
+    throw new CliError("invalid_argument", `${commandLabel} --tier must be auto, speed, or precision.`);
+  }
+  return tier;
 }
 
 function parseBackgroundRemoveArgs(rest: string[]) {
@@ -1147,6 +1235,9 @@ function parseConfigAddProviderArgs(rest: string[]) {
         i += 1;
         break;
       case "--model":
+        if (value === undefined || !value.trim()) {
+          throw new CliError("invalid_argument", "--model must not be empty.");
+        }
         state.model = value;
         i += 1;
         break;

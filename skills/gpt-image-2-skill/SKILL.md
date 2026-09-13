@@ -1,6 +1,6 @@
 ---
 name: gpt-image-2-skill
-description: This skill should be used when the user asks to "generate an image", "create a logo", "draw an icon", "edit this photo", "change background to transparent", "remove background", "transparent background", "cut out", "isolate subject", "remove bg", "make transparent", "extract subject", "background removal", "批量抠图", "用 GPT image 生成图片", "用 Codex 画图", "帮我生成一张图", "改成透明背景", "抠图", "把背景去掉", "把这张图编辑一下", or any prompt-to-image, reference-image-edit, standalone background-removal, or transparent PNG delivery task that benefits from a structured CLI returning JSON results and JSONL progress events. Supports OpenAI `gpt-image-2` (via `OPENAI_API_KEY` or OpenAI-compatible base URL), Codex `image_generation` (via `~/.codex/auth.json`), and merged `background-remove` local cutout workflows under one command surface, with masks, custom sizes up to 4K, transparent PNG verification, single-image and batch background removal, and a raw request escape hatch.
+description: This skill should be used when the user asks to "generate an image", "create a logo", "draw an icon", "edit this photo", "change background to transparent", "remove background", "transparent background", "cut out", "isolate subject", "remove bg", "make transparent", "extract subject", "background removal", "批量抠图", "用 GPT image 生成图片", "用 Codex 画图", "帮我生成一张图", "批量生成图片", "精修这张图", "改成透明背景", "抠图", "把背景去掉", "把这张图编辑一下", or any prompt-to-image, reference-image-edit, standalone background-removal, or transparent PNG delivery task that benefits from a structured CLI returning JSON results and JSONL progress events. Supports OpenAI `gpt-image-2.5-flare` (speed-first default for generation and batch runs), `gpt-image-2.5-sunburst` (precision-first default for reference-image edits and final delivery), and any custom model name via `--model`, plus Codex `image_generation` (via `~/.codex/auth.json`) and merged `background-remove` local cutout workflows under one command surface, with masks, custom sizes up to 4K, transparent PNG verification, single-image and batch background removal, and a raw request escape hatch.
 ---
 
 Run image generation and editing through one CLI surface that hides provider differences. The runtime in `scripts/` is now pure TypeScript plus a thin CJS launcher.
@@ -19,6 +19,7 @@ SKILL_CMD="gpt-image-2-skill"
 ## When to use this skill
 
 - Generate or edit an image and capture a structured result an agent can parse.
+- Pick the right model tier for the job without memorizing model names: `gpt-image-2.5-flare` for generation and batch runs, `gpt-image-2.5-sunburst` for reference-image edits and precision work.
 - Switch between `OPENAI_API_KEY`, an OpenAI-compatible base URL, and Codex `auth.json` without changing command shape.
 - Respect shared provider config at `$CODEX_HOME/gpt-image-2-skill/config.json` so CLI, App, and Skill use the same default provider.
 - Need final transparent PNG deliverables, masks, custom sizes up to 4K, or raw request bodies.
@@ -45,11 +46,13 @@ $SKILL_CMD --json --json-events \
   --size 2K --quality high
 
 # 3. Generate a normal image (auto-selects provider; OpenAI first, then Codex)
+#    Generation defaults to the speed-first model; add --tier precision or --model <name> to change it.
 $SKILL_CMD --json --json-events \
   images generate --prompt "..." --out /tmp/out.png \
   --format png --size 2K
 
 # 4. Edit a reference image (OpenAI multipart)
+#    Reference-image edits default to the precision-first model.
 $SKILL_CMD --json --json-events \
   images edit --prompt "..." --ref-image /tmp/in.png --out /tmp/out.png
 
@@ -77,6 +80,43 @@ $SKILL_CMD --json doctor
 ```
 
 Force a provider with `--provider openai`, `--provider codex`, or any named provider from `config inspect`. You can place `--provider <id>` before the command group or inside the subcommand; leave the default `--provider auto` to use `default_provider` first. Streaming now defaults to off; pass `--stream` when you want SSE/streaming behavior for a single request, or persist it on a provider via `config add-provider --stream`.
+
+## Model selection: flare vs sunburst
+
+Two OpenAI image models are available. Pick by purpose, not by habit:
+
+| Model | Tier | Use for | Avoid for |
+|---|---|---|---|
+| `gpt-image-2.5-flare` | speed-first | everyday generation, SNS posts, web assets, thumbnails, batch runs, first drafts and exploration, cost-sensitive volume | final ad/product art that needs repeated precise edits |
+| `gpt-image-2.5-sunburst` | precision-first | edits driven by an existing reference image, multi-round refinement, exact detail and layout control, ad creative, product shots, final delivery | high-volume throwaway drafts where speed and cost dominate |
+
+The runtime routes automatically, so the common cases need no extra flags:
+
+| Situation | Command shape | Resolves to |
+|---|---|---|
+| Generate a new image | `images generate --prompt ...` | `gpt-image-2.5-flare` |
+| Generate a controlled matte source for transparent assets | `transparent generate --prompt ...` | `gpt-image-2.5-flare` |
+| Edit an existing image | `images edit --ref-image ...` | `gpt-image-2.5-sunburst` |
+| Escalate a draft into final art | add `--tier precision` | `gpt-image-2.5-sunburst` |
+| Force speed on a bulk edit pass | add `--tier speed` | `gpt-image-2.5-flare` |
+| Use a vendor or pinned model | add `--model <name>` | that exact name |
+
+Model resolution order, highest priority first:
+
+1. `--model <name>` — exact model name, including custom/third-party names. Short aliases `flare` and `sunburst` expand to the full names.
+2. `--tier speed|precision` — declare intent when you do not want to name a model.
+3. Provider config `model` — a model pinned by `config add-provider --model`.
+4. Operation default — `generate` → `gpt-image-2.5-flare`, `edit` → `gpt-image-2.5-sunburst`.
+
+Every `images generate`, `images edit`, `transparent generate`, and `request create` result includes a `model_resolution` object (`operation`, `tier`, `tier_source`, `requested_model`, `provider_model`, `resolved_model`, `source`, `delegated_to_server`, `reason`). Read it instead of guessing which model served the request; `doctor` reports the routing defaults under `model_routing`.
+
+Notes that change how you pass flags:
+
+- `--model` applies to OpenAI and OpenAI-compatible providers. Its value is sent as the request `model`, so any name the upstream accepts works.
+- Under `--provider codex`, `model` is the Codex orchestrator model (`gpt-5.4` by default) and the image model is chosen server-side, so flare/sunburst routing does not apply. `model_resolution.delegated_to_server` is `true`; `--model` overrides the orchestrator model only.
+- `request create` passes the body through: a `model` in the body wins (reported as `source: "explicit_model"`), and the runtime only fills in the routed default when the body omits `model`.
+- Config migration: releases up to 0.3.x wrote `model: "gpt-image-2"` into provider configs (config version 1). A version-1 config is migrated once to version 2, which drops that legacy pin so routing takes effect; `doctor` lists the affected providers under `model_routing.legacy_model_pins`. Pins written after the migration are honored, so `config add-provider --model gpt-image-2` — or `--model gpt-image-2` per call — keeps an older model.
+- Tier routing is not a quality crutch: `--tier precision` costs more and is slower. Use it for reference-image edits and final deliverables, not for bulk drafts.
 
 ## Runtime consistency check
 
@@ -142,6 +182,8 @@ Output **properties** (not "what to draw") are flag-controlled. Putting them in 
 
 | Property | Use this flag, not the prompt |
 |---|---|
+| Model choice | `--model <name>` (any custom name; `flare` / `sunburst` aliases) |
+| Purpose tier | `--tier auto\|speed\|precision` |
 | Output background (transparent / opaque / auto) | `--background auto\|transparent\|opaque` |
 | Output dimensions | `--size 2K`, `--size 4K`, or `--size WIDTHxHEIGHT` |
 | Output container | `--format png\|jpeg\|webp` |
@@ -156,13 +198,13 @@ The prompt is for "what is in the picture"; background, size, format, count, and
 
 ## Transparent PNG deliverables
 
-For transparent output, do not rely on provider-native transparency. Use the `transparent` command group as the Agent-facing tool layer:
+透明输出优先使用上游原生透明能力：
 
-- `transparent generate` — prompt-to-final PNG. It generates a controlled matte source, tries the integrated `background-remove` pipeline first, falls back to local chroma extraction when needed, verifies the result, and only succeeds when the final PNG passes transparency checks.
-- `transparent extract` — direct cutout for an existing source image. Use `--method auto` by default; the runtime picks the best available local extraction path and verifies the PNG before returning success.
-- `transparent verify` — final gate for any PNG before delivery. Use `--strict` and the right `--profile` when the file must be accepted or fail the task.
+- `transparent generate`：提示词生成最终透明 PNG，直接发送 `background: transparent` 与 `output_format: png`，只做最终 alpha 校验，不生成受控底图，也不调用本地抠图。
+- `transparent extract`：对已有图片做本地抠图。默认 `--method auto`，运行时选择可用的背景移除路径并验证 PNG。
+- `transparent verify`：交付前的 PNG 校验门。使用 `--strict` 和合适的 `--profile` 可在校验失败时终止任务。
 
-`transparent generate` now also reports `final_background_intent`, `selected_matte_color`, and `intermediate_extraction_background` in JSON so the agent can see the deterministic matte choice and retry candidates used internally.
+`transparent generate` 的 JSON 包含 `transparency_mode: "upstream-native"`、`request.background` 和 `model_resolution`；`selected_strategy`、`attempts` 等抠图字段仅适用于 `transparent extract`。如果兼容服务端不支持原生透明，生成会在 alpha 校验阶段失败，此时应改用 `transparent extract`。
 
 ## Direct cutout workflow
 
@@ -228,7 +270,7 @@ The CLI is intentionally not a material classifier. The Agent should choose gene
 
 | Asset type | Generation guidance | Extraction guidance |
 |---|---|---|
-| Opaque object, icon, sticker, product | Single isolated subject, clear margin, perfectly flat matte. Prefer black or white first; only fall back to a colored matte if either one blends into the subject. | `transparent generate` or `transparent extract --method auto --matte-color auto`; the runtime tries `background-remove` first, then chroma fallback if verification or extraction fails. |
+| Opaque object, icon, sticker, product | Single isolated subject with clear margin and no unwanted background. | Prompt-to-final asset: `transparent generate` uses native transparency. Existing image: `transparent extract --method auto --matte-color auto`. |
 | Thin edges, hair, fur, lace, chain, netting | Use high resolution, strong subject/background contrast, no contact shadow, no background-colored details. Try magenta/cyan/green mattes if one contaminates the edge. | `background-remove` first, then chroma extraction with `--spill-suppression` when needed; verify with `--expected-matte-color` and retry with a different matte if residue remains. |
 | Glass, crystal, liquid, hologram | Ask for a centered asset on flat black and flat white backgrounds, keeping geometry identical. Use reference/edit flow when possible to keep alignment. | `transparent extract --method dual --dark-image black.png --light-image white.png` |
 | Glow, flame, smoke, mist, magic particles | Generate dark and light background variants. Avoid textured backgrounds and avoid bloom reaching the image edge unless the edge is intentional. | Prefer dual extraction; verify that `partial_pixels` is non-zero. |
@@ -240,6 +282,8 @@ For chroma extraction, `--matte-color auto` samples the actual flat source backg
 For extraction tuning, use `--material` only as a broad hint, not as a subject classifier: `standard`, `soft-3d`, `flat-icon`, `sticker`, or `glow`. Manual `--threshold`, `--softness`, and `--spill-suppression` override the selected preset.
 
 For style-locked transparent assets, `transparent generate` is prompt-only. Use a flat RGB reference image with `images edit --ref-image` to create a controlled matte source, then run `transparent extract`. Do not use a transparent PNG as the reference image unless you intentionally want the alpha/composited edge behavior to influence the edit.
+
+For transparent work, the tier split matters: bulk asset runs should stay on the default speed-first model (`transparent generate`, or `images edit --tier speed` when reusing a reference matte), while a single hero asset that needs repeated precise retouching should use `--tier precision`.
 
 Do not ask the image model to render exact UI text, numbers, scores, labels, or logos as part of the bitmap unless distorted text is acceptable. Generate the visual asset without text, then render exact text in the host app or design tool.
 
@@ -272,7 +316,7 @@ $SKILL_CMD --json \
 
 Always inspect the JSON verification fields before delivery: `passed`, `alpha_min`, `alpha_max`, `transparent_ratio`, `partial_pixels`, and `warnings`. Also inspect quality fields: `checkerboard_detected`, `touches_edge`, `edge_margin_px`, `stray_pixel_count`, `largest_component_ratio`, `matte_residue_checked`, `matte_residue_score`, `halo_score`, `transparent_rgb_scrubbed`, `alpha_health_score`, `residue_score`, `quality_score`, and `failure_reasons`. If `passed` is false, do not deliver the file as a transparent PNG. If `matte_residue_checked` is false for a chroma-derived PNG, run `transparent verify` again with the source matte via `--expected-matte-color`.
 
-For `transparent generate` and `transparent extract`, also inspect `selected_strategy` and `attempts` in JSON output. They tell you whether the final asset came from integrated `background-remove`, built-in chroma fallback, or dual extraction.
+For `transparent generate`, inspect `transparency_mode`, `request.background`, `verification`, and `model_resolution`. For `transparent extract`, inspect `selected_strategy` and `attempts` to see whether `background-remove`, chroma, or dual extraction produced the final asset.
 
 `transparent extract --method` now has explicit semantics:
 
@@ -292,7 +336,8 @@ Direct-cutout error handling and retries:
 
 ## Notes
 
-- `openai` defaults to `gpt-image-2`; `codex` defaults to `gpt-5.4` and delegates to `image_generation`.
+- `openai` defaults to `gpt-image-2.5-flare` for generation and `gpt-image-2.5-sunburst` for reference-image edits; `codex` defaults to `gpt-5.4` and delegates to `image_generation`.
+- Model overrides: `--model <name>` (any custom name) and `--tier speed|precision` apply to `images generate`, `images edit`, and `transparent generate`. See "Model selection: flare vs sunburst" for the resolution order.
 - Shared options actually honored everywhere: `--size`, `--quality`, `--format`, `--compression`.
 - OpenAI-only options: `--background`, `--n`, `--moderation`, `--mask`, `--input-fidelity`.
 - Retries: up to 3 with exponential backoff (1s → 2s → 4s). Codex `401` triggers one token refresh + one retry.

@@ -11,6 +11,23 @@ Built-in providers and named providers share the same command surface. Pick a bu
 
 The resolved provider appears in `doctor` output as `provider_selection.resolved`.
 
+## Model routing
+
+`--model` and `--tier` select the image model independently of the provider. Resolution order:
+
+| Priority | Source | Result |
+|---|---|---|
+| 1 | `--model <name>` | that exact model name (`flare` / `sunburst` expand to the full names) |
+| 2 | `--tier speed\|precision` | `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` |
+| 3 | provider config `model` | the pinned model; a legacy `gpt-image-2` pin is stripped once by the version-1 → version-2 config migration |
+| 4 | operation default | `generate` → `gpt-image-2.5-flare`, `edit` → `gpt-image-2.5-sunburst` |
+
+Defaults by purpose: `gpt-image-2.5-flare` is speed-first (daily output, SNS, web assets, batch runs); `gpt-image-2.5-sunburst` is precision-first (edits from an existing image, multi-round refinement, ads, product shots, final delivery).
+
+Config migration: config version 1 (releases up to 0.3.x) pinned `model: "gpt-image-2"` on providers, which would shadow routing. On read, a version-1 config is migrated to version 2 and those legacy pins are dropped; `doctor` lists the affected providers under `model_routing.legacy_model_pins`. Because the migration is version-gated, a pin written afterwards is kept — use `config add-provider --name legacy --model gpt-image-2 ...`, or pass `--model gpt-image-2` per call, when an upstream still serves only the previous generation.
+
+`model_resolution` in JSON output reports the decision (`resolved_model`, `source`, `tier`, `tier_source`, `reason`). `doctor` reports the routing defaults under `model_routing`.
+
 ## Shared config
 
 Default paths:
@@ -32,7 +49,7 @@ Example provider:
     "my-image-api": {
       "type": "openai-compatible",
       "api_base": "https://example.com/v1",
-      "model": "gpt-image-2",
+      "model": "vendor-image-v3",
       "credentials": {
         "api_key": { "source": "file", "value": "sk-..." }
       }
@@ -65,8 +82,8 @@ $SKILL_CMD --json config clear-user-agent
 
 | Item | Default |
 |---|---|
-| Model | `gpt-image-2` (override with `-m/--model`) |
-| API base | `https://api.openai.com/v1` (override with `--openai-api-base`) |
+| Model | `gpt-image-2.5-flare` for generate, `gpt-image-2.5-sunburst` for edit (override with `--model` or `--tier`) |
+| API base | `https://api.openai.com/v1` (set `OPENAI_API_BASE` or configure a provider to change it) |
 | Generate path | `/images/generations` |
 | Edit path | `/images/edits` (multipart upload) |
 | Auth source | `OPENAI_API_KEY` env, then `--api-key` flag |
@@ -79,9 +96,9 @@ OpenAI-compatible bases (e.g. `https://api.duckcoding.ai/v1`) work as long as th
 
 | Item | Default |
 |---|---|
-| Model | `gpt-5.4` (override with `-m/--model`) |
+| Model | `gpt-5.4` orchestrator (override with `--model`) |
 | Endpoint | `https://chatgpt.com/backend-api/codex/responses` |
-| Image tool | `image_generation` (delegates to `gpt-image-2` server-side) |
+| Image tool | `image_generation` (the server picks the image model, so flare/sunburst routing does not apply) |
 | Auth source | `~/.codex/auth.json` or `$CODEX_HOME/auth.json` |
 | Refresh endpoint | `https://auth.openai.com/oauth/token` |
 

@@ -89,26 +89,24 @@ Use `2K` or `4K` aliases when in doubt.
 
 The transparent pipeline wrote an output image, but the final alpha gate did not pass. Do not deliver the file.
 
-Common causes:
+常见原因：
 
-- the source background was not flat
-- the matte color appears inside the subject
-- the subject touches the image edge
-- a checkerboard image is masquerading as transparency
-- fully transparent pixels still contain matte-colored RGB values
-- strict profile requirements do not match the asset type
-- a glow/smoke/glass asset was extracted with chroma instead of dual-background extraction
-- black/white dual sources were not aligned
+- 上游服务忽略了 `background: transparent`，返回了没有 alpha 的 PNG
+- 主体接触图像边缘
+- 检查器识别出棋盘格伪透明图
+- 全透明像素仍包含不应保留的 RGB 值
+- 严格 profile 与素材类型不匹配
+- 对光效、烟雾或玻璃素材选择了单图抠图而不是双背景提取
+- 黑白双背景源图没有对齐
 
-Fixes:
+处理方式：
 
-- retry with `--report-dir` or `--keep-sources` so the source image can be inspected
-- for AI-generated flat backgrounds, run extraction with `--matte-color auto` so the CLI samples the actual source matte
-- use a different matte: `magenta`, `cyan`, `blue`, `green`, `black`, or `white`
-- use `--material soft-3d`, `flat-icon`, `sticker`, or `glow` when broad edge behavior matches better than the standard chroma defaults
-- generate source prompts that explicitly forbid shadows, gradients, textures, and scenery
-- for semi-transparent effects, generate aligned black/white source images and run `transparent extract --method dual`
-- choose a profile explicitly: `--profile icon`, `product`, `sticker`, `seal`, `translucent`, `glow`, `shadow`, or `effect`
+- 原生透明失败时，先确认 provider 是否支持 `background: transparent`；兼容服务若不支持，改用 `images generate/edit` 生成 RGB 源图后再运行 `transparent extract`
+- 对已有 AI 平面底图使用 `transparent extract --matte-color auto`，让 CLI 从边缘采样实际底色
+- 根据素材选择 `--material soft-3d`、`flat-icon`、`sticker` 或 `glow`
+- 半透明效果使用对齐的黑白源图，并显式运行 `transparent extract --method dual`
+- 显式选择校验档位：`--profile icon`、`product`、`sticker`、`seal`、`translucent`、`glow`、`shadow` 或 `effect`
+- 不要给 `transparent generate` 传 `--report-dir`、`--keep-sources`、`--matte-color` 等已移除的本地抠图参数
 - pass `--expected-matte-color <color>` during verification when checking chroma residue
 - always re-run `transparent verify --profile <profile> --strict` on the final PNG
 

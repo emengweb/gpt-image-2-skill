@@ -15,7 +15,7 @@
 >
 > 当前仓库已经移除 Rust/Tauri 运行时，CLI、Skill 与 Web 界面统一为纯 TypeScript 实现。
 
-面向 AI Agent 与 Web 用户的 GPT Image 2 CLI、Skill 和静态前端。一个纯 TypeScript 运行核心同时支持 `OPENAI_API_KEY`、OpenAI-compatible `--openai-api-base`，以及 Codex `~/.codex/auth.json` 图片链路。CLI 与 Skill 共用 `$CODEX_HOME/gpt-image-2-skill/config.json`。
+面向 AI Agent 与 Web 用户的 GPT Image 2 CLI、Skill 和静态前端。一个纯 TypeScript 运行核心同时支持 `OPENAI_API_KEY`、通过 `OPENAI_API_BASE` 或 provider 配置指定的 OpenAI-compatible 服务端，以及 Codex `~/.codex/auth.json` 图片链路。CLI 与 Skill 共用 `$CODEX_HOME/gpt-image-2-skill/config.json`。
 
 ## 功能特性
 
@@ -59,9 +59,9 @@ OPENAI_API_KEY=sk-... gpt-image-2-skill --json \
 OpenAI-compatible Base URL：
 
 ```bash
-OPENAI_API_KEY=sk-... gpt-image-2-skill --json \
+OPENAI_API_KEY=sk-... OPENAI_API_BASE=https://example.com/v1 \
+gpt-image-2-skill --json \
   --provider openai \
-  --openai-api-base https://example.com/v1 \
   images generate \
   --prompt "A polished geometric app logo on transparent background" \
   --out ./logo.png \

@@ -1,7 +1,7 @@
 interface:
   display_name: "GPT Image 2 Skill"
-  short_description: "Generate, edit, and remove backgrounds through one TypeScript CLI with flare/sunburst model routing, OpenAI, Codex, and merged local cutout workflows"
-  default_prompt: "Use $gpt-image-2-skill to inspect provider and background-removal readiness, keep generation on the speed-first gpt-image-2.5-flare default and reference-image edits on the precision-first gpt-image-2.5-sunburst default (or pass --model / --tier explicitly), choose openai or codex when generating or editing, run standalone or batch background removal when needed, and consume progress events from the TypeScript skill runtime."
+  short_description: "通过 TypeScript CLI 生成、编辑和输出原生透明 PNG，支持 flare/sunburst 路由与已有图片抠图"
+  default_prompt: "Use $gpt-image-2-skill for image generation and reference-image edits. Keep ordinary generation and transparent generate on the speed-first gpt-image-2.5-flare default, and reference-image edits or precision requests on gpt-image-2.5-sunburst; an explicit --model always wins and accepts custom names. For transparent generate, request upstream-native transparency and verify the final PNG. Use transparent extract for existing-image cutouts, controlled mattes, chroma, or dual black/white workflows; do not pass removed matte/source options to transparent generate. Choose openai or codex and consume JSON/JSONL results from the TypeScript runtime."
 
 policy:
   allow_implicit_invocation: true

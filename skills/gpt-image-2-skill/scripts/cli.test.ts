@@ -3783,6 +3783,18 @@ test("runCodexRequestCreate passes through response.in_progress, response.output
 
 const skillRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
+test("skill description stays within the 1024-character loader limit", () => {
+  const skillMd = fs.readFileSync(path.join(skillRoot, "SKILL.md"), "utf8");
+  const frontmatter = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+  assert.ok(frontmatter, "SKILL.md must have YAML frontmatter");
+  const description = frontmatter.match(/^description:[ \t]*(.+)$/m)?.[1].trim();
+  assert.ok(description, "SKILL.md must have a non-empty description");
+  assert.ok(
+    description.length <= 1024,
+    `Skill description is too long (${description.length} > 1024)`,
+  );
+});
+
 function runBundledLauncher(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; nodeArgs?: string[] } = {},
